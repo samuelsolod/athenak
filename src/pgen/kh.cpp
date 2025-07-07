@@ -23,11 +23,16 @@
 #include "coordinates/adm.hpp"
 #include "pgen.hpp"
 
+void RefinementCondition(MeshBlockPack *pmbp);
+
 //----------------------------------------------------------------------------------------
 //! \fn
 //  \brief Problem Generator for KHI tests
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
+
+  user_ref_func = RefinementCondition;
+
   if (restart) return;
   // read problem parameters from input file
   int iprob  = pin->GetReal("problem","iprob");
@@ -209,4 +214,81 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   return;
+}
+
+// Custom AMR refinement criteria
+void RefinementCondition(MeshBlockPack *pmbp) {
+  // capture variables for kernels
+  Mesh *pm = pmbp->pmesh;
+  auto &indcs = pm->mb_indcs;
+  auto &multi_d = pm->multi_d;
+  auto &three_d = pm->three_d;
+  int is = indcs.is, ie = indcs.ie, nx1 = indcs.nx1;
+  int js = indcs.js, je = indcs.je, nx2 = indcs.nx2;
+  int ks = indcs.ks, ke = indcs.ke, nx3 = indcs.nx3;
+  const int nkji = nx3 * nx2 * nx1;
+  const int nji = nx2 * nx1;
+
+  // check (on device) Hydro/MHD refinement conditions over all MeshBlocks
+  auto refine_flag_ = pm->pmr->refine_flag;
+  int nmb = pmbp->nmb_thispack;
+  int mbs = pm->gids_eachrank[global_variable::my_rank];
+  // get curve_threshold from MeshRefinement via mesh pointer
+  const Real curve_threshold = pm->pmr->GetCurveThreshold();
+
+  // check if hydro or mhd is active for this MeshBlockPack
+  if ((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) {
+    // get conserved vairables and prinitive variables (see athena.hpp for array indices)
+    auto &w0 = (pmbp->phydro != nullptr) ? pmbp->phydro->w0 : pmbp->pmhd->w0;
+
+    // get grid cell size in relevant directions 
+    const Real dx1 = pm->mesh_size.dx1;
+    const Real dx2 = pm->mesh_size.dx2;
+
+    // run each MeshBlock in the MeshBlockPack in parrallel 
+    par_for_outer("ConsRefineCond", DevExeSpace(), 0, 0, 0, nmb - 1,
+      KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+        if (curve_threshold != 0.0) {
+          Real curve_indicator = 0.0;
+
+          // loop over all of the cells in the MeshBlock in parallel
+          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
+            [=](const int idx, Real &max_curve) {
+              int k = (idx) / nji;
+              int j = (idx - k * nji) / nx1;
+              int i = (idx - k * nji - j * nx1) + is;
+              j += js;
+              k += ks;
+
+              // ensure that we are not at the boundary of the MeshBlock to avoid out of bounds
+              if (i > is+1 && i < ie-1 && j > js+1 && j < je-1) {
+                Real rho = w0(m, IDN, k, j, i);
+                Real pres = w0(m, IPR, k, j, i);
+
+                // Second derivative in x (central difference)
+                Real d2dx_rho = (-2.0 * rho + w0(m, IDN, k, j, i+1) + w0(m, IDN, k, j, i-1)) / SQR(dx1);
+                Real d2dx_pres = (-2.0 * pres + w0(m, IPR, k, j, i+1) + w0(m, IPR, k, j, i-1)) / SQR(dx1);
+
+                // Second derivative in y (central difference)
+                Real d2dy_rho = (-2.0 * rho + w0(m, IDN, k, j+1, i) + w0(m, IDN, k, j-1, i)) / SQR(dx2);
+                Real d2dy_pres = (-2.0 * pres + w0(m, IPR, k, j+1, i) + w0(m, IPR, k, j-1, i)) / SQR(dx2);
+
+                // compute curvature indicator using equation (72) from Matsumoto (2007)
+                Real curvature_rho = fabs(SQR(dx1) * d2dx_rho + SQR(dx2) * d2dy_rho) / rho;
+                Real curvature_pres = fabs(SQR(dx1) * d2dx_pres + SQR(dx2) * d2dy_pres) / pres;
+
+                // choose the maximum curvature value between density and pressure
+                max_curve = fmax(curvature_rho, curvature_pres);
+              } 
+                // max-curve is the local curvature value for the current cell in the parrallell loop
+                // Kokkos::Max find the maximum curvature over the entire meshblock
+            },Kokkos::Max<Real>(curve_indicator));
+
+            // check if the curve_indicator exceeds the threshold
+            if (curve_indicator > curve_threshold) {refine_flag_.d_view(m+mbs) = 1;}
+            if (curve_indicator < curve_threshold) {refine_flag_.d_view(m+mbs) = -1;}
+        }
+      }
+    );
+  }
 }

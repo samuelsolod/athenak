@@ -1145,9 +1145,17 @@ def main(**kwargs):
         plt.imshow(quantity[block_num], cmap=kwargs['cmap'], norm=norm, vmin=vmin,
                    vmax=vmax, interpolation='none', origin='lower',
                    extent=extents[block_num])
+        
+    
 
     # Make colorbar
     plt.colorbar(label=label)
+    
+    # Set limits for axes to remove whitespace
+    plt.xlim(-1.0, 1.0)
+    plt.ylim(-1.0, 1.0)
+
+    # plt.title('Density Slice at t = 3.0, reconstruct = wenoz, rsolver = hllc')
 
     # Mark grid
     if kwargs['grid']:

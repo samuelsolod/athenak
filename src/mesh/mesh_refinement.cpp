@@ -6,6 +6,7 @@
 //! \file mesh_refinement.cpp
 //! \brief Implements constructor and functions in MeshRefinement class.
 //! Note while restriction functions for CC and FC data are implemented in this file,
+
 //! prolongation operators are implemented as INLINE functions in prolongation.hpp (and
 //! are used both here for AMR and in the BVals class at fine/coarse boundaries).
 
@@ -52,6 +53,7 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   dd_threshold_(0.0),
   dp_threshold_(0.0),
   dv_threshold_(0.0),
+  curve_threshold(0.0),
   check_cons_(false) {
   if (pin->DoesBlockExist("mesh_refinement")) {
     // read interval (in cycles) between check of AMR and derefinement
@@ -76,6 +78,10 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
     }
     if (pin->DoesParameterExist("mesh_refinement", "dvel_max")) {
       dd_threshold_ = pin->GetReal("mesh_refinement", "dvel_max");
+      check_cons_ = true;
+    }
+    if (pin->DoesParameterExist("mesh_refinement", "curve_max")) {
+      curve_threshold = pin->GetReal("mesh_refinement", "curve_max");
       check_cons_ = true;
     }
   }
@@ -166,6 +172,8 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
 //! These are controlled by input parameters in the <mesh_refinement> block.
 //! User-defined refinement conditions can also be enrolled by setting the *usr_ref_func
 //! pointer in the problem generator.
+//! User defined refinement condtions: 
+//!   (1) curve_threshold: normalized curvature of local density and pressure
 
 void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   // reallocate and zero refine_flag in host space and sync with device
