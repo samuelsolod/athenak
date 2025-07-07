@@ -22,12 +22,14 @@
 #include "eos/eos.hpp"
 #include "hydro/hydro.hpp"
 #include "pgen.hpp"
+#include "globals.hpp"
 
 //----------------------------------------------------------------------------------------
 //! \fn ProblemGenerator::UserProblem()
 //  \brief Shu-Osher test problem generator
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
+  
   if (restart) return;
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
@@ -60,6 +62,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real &x1max = size.d_view(m).x1max;
     int nx1 = indcs.nx1;
     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+
+    Real &x2min = size.d_view(m).x2min;
+    Real &x2max = size.d_view(m).x2max;
+    int nx2 = indcs.nx2;
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
 
     if (x1v < -0.8) {
       u0(m,IDN,k,j,i) = dl;

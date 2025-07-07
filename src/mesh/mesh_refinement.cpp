@@ -168,6 +168,9 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
     pmrc->SetRefinementData(pmbp, false, true);
   }
 
+  // check (on device) Hydro/MHD refinement conditions for cons vars over all MeshBlocks
+  auto refine_flag_ = refine_flag;
+  
   // iterate through list of refinement criteria and apply methods
   for (auto it = pmrc->rcrit.begin(); it != pmrc->rcrit.end(); ++it) {
     switch (it->rmethod) {
@@ -182,6 +185,9 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
         break;
       case RefCritMethod::location:
         pmrc->CheckLocation(pmbp, *it);
+        break;
+      case RefCritMethod::spectral_norm:
+        pmrc->CheckSpectralNorm(pmbp, *it);
         break;
       case RefCritMethod::user:
         pmy_mesh->pgen->user_ref_func(pmbp);

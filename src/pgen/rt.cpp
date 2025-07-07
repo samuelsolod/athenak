@@ -44,14 +44,17 @@
 #include "srcterms/srcterms.hpp"
 #include "utils/random.hpp"
 #include "pgen.hpp"
+#include "globals.hpp"
 
 #include <Kokkos_Random.hpp>
+
 
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
 //  \brief Problem Generator for the Rayleigh-Taylor instability test
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
+
   if (restart) return;
   if (pmy_mesh_->one_d) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl

@@ -416,41 +416,41 @@ void SetADMVariablesToFLRW(MeshBlockPack *pmbp) {
   int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
   int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
 
-  Real a = 1.0 + fac*(t-t0);
-  Real a2 = a*a;
-  par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
-  KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real &x1min = size.d_view(m).x1min;
-    Real &x1max = size.d_view(m).x1max;
-    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+  // Real a = 1.0 + fac*(t-t0);
+  // Real a2 = a*a;
+  // par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
+  // KOKKOS_LAMBDA(int m, int k, int j, int i) {
+  //   Real &x1min = size.d_view(m).x1min;
+  //   Real &x1max = size.d_view(m).x1max;
+  //   Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
 
-    Real &x2min = size.d_view(m).x2min;
-    Real &x2max = size.d_view(m).x2max;
-    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+  //   Real &x2min = size.d_view(m).x2min;
+  //   Real &x2max = size.d_view(m).x2max;
+  //   Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
 
-    Real &x3min = size.d_view(m).x3min;
-    Real &x3max = size.d_view(m).x3max;
-    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+  //   Real &x3min = size.d_view(m).x3min;
+  //   Real &x3max = size.d_view(m).x3max;
+  //   Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
-    adm.g_dd(m,0,0,k,j,i) = a2;
-    adm.g_dd(m,0,1,k,j,i) = 0.0;
-    adm.g_dd(m,0,2,k,j,i) = 0.0;
-    adm.g_dd(m,1,1,k,j,i) = a2;
-    adm.g_dd(m,1,2,k,j,i) = 0.0;
-    adm.g_dd(m,2,2,k,j,i) = a2;
+  //   adm.g_dd(m,0,0,k,j,i) = a2;
+  //   adm.g_dd(m,0,1,k,j,i) = 0.0;
+  //   adm.g_dd(m,0,2,k,j,i) = 0.0;
+  //   adm.g_dd(m,1,1,k,j,i) = a2;
+  //   adm.g_dd(m,1,2,k,j,i) = 0.0;
+  //   adm.g_dd(m,2,2,k,j,i) = a2;
 
-    adm.vK_dd(m,0,0,k,j,i) = -a*fac;
-    adm.vK_dd(m,0,1,k,j,i) = 0.0;
-    adm.vK_dd(m,0,2,k,j,i) = 0.0;
-    adm.vK_dd(m,1,1,k,j,i) = -a*fac;
-    adm.vK_dd(m,1,2,k,j,i) = 0.0;
-    adm.vK_dd(m,2,2,k,j,i) = -a*fac;
+  //   adm.vK_dd(m,0,0,k,j,i) = -a*fac;
+  //   adm.vK_dd(m,0,1,k,j,i) = 0.0;
+  //   adm.vK_dd(m,0,2,k,j,i) = 0.0;
+  //   adm.vK_dd(m,1,1,k,j,i) = -a*fac;
+  //   adm.vK_dd(m,1,2,k,j,i) = 0.0;
+  //   adm.vK_dd(m,2,2,k,j,i) = -a*fac;
 
-    adm.alpha(m,k,j,i) = 1.0;
-    adm.beta_u(m,0,k,j,i) = 0.0;
-    adm.beta_u(m,1,k,j,i) = 0.0;
-    adm.beta_u(m,2,k,j,i) = 0.0;
-  });
+  //   adm.alpha(m,k,j,i) = 1.0;
+  //   adm.beta_u(m,0,k,j,i) = 0.0;
+  //   adm.beta_u(m,1,k,j,i) = 0.0;
+  //   adm.beta_u(m,2,k,j,i) = 0.0;
+  // });
 }
 
 } // namespace

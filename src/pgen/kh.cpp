@@ -32,6 +32,7 @@
 //  \brief Problem Generator for KHI tests
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
+
   if (restart) return;
   // read problem parameters from input file
   int iprob  = pin->GetReal("problem","iprob");
@@ -121,7 +122,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       vy = -amp*vshear*sin(2.*M_PI*x1v)*exp( -SQR(x2v/sigma) );
       vz = 0.0;
       scal = 0.0;
-      if (x2v > 0.0) scal = 1.0;
+      if (x2v > 0.5) scal = 1.0;
     } else if (iprob == 2) {
       // pres = 1.0;
       pres = p_in;

@@ -192,13 +192,46 @@ def main(**kwargs):
     # print(data)
     # print(y_vals)
     # print(x_vals)
-
+    
     # make single plot
-    if (nfiles == 1):
-        # Plot data
+    if nfiles == 1:
         plt.figure()
-        plt.plot(x_vals[0], y_vals[0], '.')
-        plt.show()
+        plt.plot(x_vals[0], y_vals[0], '.', label='Simulation')
+
+        # Optional: overplot second file
+        input2_file = kwargs.get('input2')
+        if input2_file:
+            data2 = athena_read.tab(input2_file)
+            if yvar not in data2:
+                print(f"Variable '{yvar}' not found in second file. Valid keys:")
+                for key in data2:
+                    print(key)
+                raise RuntimeError
+
+            # Find x-axis variable in second file
+            if 'x1v' in data2:
+                xvar2 = 'x1v'
+            elif 'x2v' in data2:
+                xvar2 = 'x2v'
+            elif 'x3v' in data2:
+                xvar2 = 'x3v'
+            else:
+                raise RuntimeError('No x-vector found in second file.')
+
+            x2 = data2[xvar2]
+            y2 = data2[yvar]
+            plt.plot(x2, y2, '-', label='Reference')
+
+        plt.xlabel('x1')
+        plt.ylabel('Density')
+        plt.title('1D Shu Osher Position vs Density')
+        plt.legend()
+
+        if output_file == 'show':
+            plt.show()
+        else:
+            plt.savefig(output_file)
+        plt.close()
 
     # make animation with multiple files
     else:
@@ -237,6 +270,7 @@ if __name__ == '__main__':
     parser.add_argument('-n', '--nfiles',
                         default=1,
                         help='number of files to be plotted for animations')
+    parser.add_argument('--input2', help='optional second input .tab file')
 
     args = parser.parse_args()
     main(**vars(args))

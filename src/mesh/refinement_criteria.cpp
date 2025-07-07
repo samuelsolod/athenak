@@ -43,6 +43,8 @@ RefinementCriteria::RefinementCriteria(Mesh *pm, ParameterInput *pin) :
         rcrit0.rmethod = RefCritMethod::second_deriv;
       } else if (method.compare("location") == 0) {
         rcrit0.rmethod = RefCritMethod::location;
+      } else if (method.compare("spectral_norm") == 0) {
+        rcrit0.rmethod = RefCritMethod::spectral_norm;
       } else if (method.compare("user") == 0) {
         rcrit0.rmethod = RefCritMethod::user;
       } else {
@@ -53,12 +55,43 @@ RefinementCriteria::RefinementCriteria(Mesh *pm, ParameterInput *pin) :
       if ((method.compare("location")!=0) && (method.compare("user")!=0)) {
         rcrit0.rvariable = pin->GetString(it->block_name,"variable");
       }
+      if ((method.compare("location") != 0) &&
+          (method.compare("spectral_norm") != 0) &&
+          (method.compare("user") != 0)) {
+        rcrit0.rvariable = pin->GetString(it->block_name, "variable");
+      }
       rcrit0.rvalue_min = pin->GetOrAddReal(it->block_name,"value_min",(-FLT_MAX));
       rcrit0.rvalue_max = pin->GetOrAddReal(it->block_name,"value_max", (FLT_MAX));
       rcrit0.rloc_x1  = pin->GetOrAddReal(it->block_name,"location_x1", 0.0);
       rcrit0.rloc_x2  = pin->GetOrAddReal(it->block_name,"location_x2", 0.0);
       rcrit0.rloc_x3  = pin->GetOrAddReal(it->block_name,"location_x3", 0.0);
       rcrit0.rloc_rad = pin->GetOrAddReal(it->block_name,"location_rad", 0.0);
+
+      // @yk : spectral norm method
+      const bool use_error_policy_sum = pin->GetOrAddBoolean(
+          it->block_name, "use_sum_for_error_policy", false);
+      rcrit0.spectral_norm_error_policy = use_error_policy_sum
+                                              ? error_policy_for_multi_dim::sum
+                                              : error_policy_for_multi_dim::max;
+      rcrit0.spectral_norm_alpha_refine =
+          pin->GetOrAddReal(it->block_name, "alpha_refine", 4.0);
+      rcrit0.spectral_norm_alpha_coarsen =
+          pin->GetOrAddReal(it->block_name, "alpha_coarsen", 5.0);
+
+      rcrit0.dfloor = pin->GetOrAddReal(it->block_name, "dfloor", 1.0e-15);
+      rcrit0.efloor = pin->GetOrAddReal(it->block_name, "efloor", 1.0e-15);
+
+      rcrit0.monitor_momentum =
+          pin->GetOrAddBoolean(it->block_name, "monitor_momentum", false);
+      rcrit0.monitor_energy =
+          pin->GetOrAddBoolean(it->block_name, "monitor_energy", false);
+
+      rcrit0.use_primitives =
+          pin->GetOrAddBoolean(it->block_name, "use_primitives", false);
+
+      rcrit0.monitor_magnetic_field =
+          pin->GetOrAddBoolean(it->block_name, "monitor_magnetic_field", false);
+
       rcrit.emplace_back(rcrit0);
     }
   }
@@ -105,13 +138,13 @@ RefinementCriteria::RefinementCriteria(Mesh *pm, ParameterInput *pin) :
 
   // Set rdata array to shallow slice of target data
   SetRefinementData(pm->pmb_pack, false, false);
+
 }
 
 //----------------------------------------------------------------------------------------
 // destructor
 
-RefinementCriteria::~RefinementCriteria() {
-}
+RefinementCriteria::~RefinementCriteria() {}
 
 //----------------------------------------------------------------------------------------
 //! \fn void RefinementCriteria::SetRefinementData()
@@ -123,6 +156,7 @@ void RefinementCriteria::SetRefinementData(MeshBlockPack* pmbp, bool count_deriv
   for (auto it = rcrit.begin(); it != rcrit.end(); ++it) {
     // Only load data for methods that need it
     if ((it->rmethod != RefCritMethod::location) &&
+        (it->rmethod != RefCritMethod::spectral_norm) &&
         (it->rmethod != RefCritMethod::user)) {
       using Kokkos::ALL;
       // hydro (lab-frame) density
@@ -382,5 +416,416 @@ void RefinementCriteria::CheckLocation(MeshBlockPack* pmbp, RefCritData crit) {
   // sync host array with device
   refine_flag.template modify<HostMemSpace>();
   refine_flag.template sync<DevExeSpace>();
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
+                                           RefCritData crit) {
+  auto &refine_flag = pmbp->pmesh->pmr->refine_flag;
+  int mbs = pmbp->pmesh->gids_eachrank[global_variable::my_rank];
+
+  // capture variables for kernels
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int &is = indcs.is, nx1 = indcs.nx1;
+  int &js = indcs.js, nx2 = indcs.nx2;
+  int &ks = indcs.ks, nx3 = indcs.nx3;
+  const int nkji = nx3 * nx2 * nx1;
+  const int nji = nx2 * nx1;
+  int nmb = pmbp->nmb_thispack;
+  auto &multi_d = pmbp->pmesh->multi_d;
+  auto &three_d = pmbp->pmesh->three_d;
+
+  // capture evolved/primitive variables
+  auto &u0 = (pmbp->phydro != nullptr) ? pmbp->phydro->u0 : pmbp->pmhd->u0;
+  auto &w0 = (pmbp->phydro != nullptr) ? pmbp->phydro->w0 : pmbp->pmhd->w0;
+
+  auto &var = crit.use_primitives ? w0 : u0;
+
+  // refinement thresholds for a 5-stencil
+  const Real spectral_norm_refine = pow(4.0, -crit.spectral_norm_alpha_refine);
+  const Real spectral_norm_coarsen =
+      pow(4.0, -crit.spectral_norm_alpha_coarsen);
+
+  auto &thres_refine = spectral_norm_refine;
+  auto &thres_coarsen = spectral_norm_coarsen;
+  auto &dfloor = crit.dfloor;
+  auto &efloor = crit.efloor;
+
+  auto &spectral_norm_error_policy = crit.spectral_norm_error_policy;
+  auto &monitor_momentum = crit.monitor_momentum;
+  auto &monitor_energy = crit.monitor_energy;
+
+  const bool monitor_magnetic_field =
+      crit.monitor_magnetic_field && (pmbp->pmhd != nullptr);
+
+  auto &bcc = pmbp->pmhd->bcc0; // cell-centered magnetic field
+
+  par_for_outer(
+      "SpectralNorm", DevExeSpace(), 0, 0, 0, (nmb - 1),
+      KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+        // Some free functions
+        //
+        auto compute_d4u_x_axis = [&var](const int m, const VariableIndex IDX,
+                                         const int k, const int j,
+                                         const int i) {
+          return var(m, IDX, k, j, i + 2) - 4.0 * var(m, IDX, k, j, i + 1) +
+                 6.0 * var(m, IDX, k, j, i) - 4.0 * var(m, IDX, k, j, i - 1) +
+                 var(m, IDX, k, j, i - 2);
+        };
+        auto compute_d4u_y_axis = [&var](const int m, const VariableIndex IDX,
+                                         const int k, const int j,
+                                         const int i) {
+          return var(m, IDX, k, j + 2, i) - 4.0 * var(m, IDX, k, j + 1, i) +
+                 6.0 * var(m, IDX, k, j, i) - 4.0 * var(m, IDX, k, j - 1, i) +
+                 var(m, IDX, k, j - 2, i);
+        };
+        auto compute_d4u_z_axis = [&var](const int m, const VariableIndex IDX,
+                                         const int k, const int j,
+                                         const int i) {
+          return var(m, IDX, k + 2, j, i) - 4.0 * var(m, IDX, k + 1, j, i) +
+                 6.0 * var(m, IDX, k, j, i) - 4.0 * var(m, IDX, k - 1, j, i) +
+                 var(m, IDX, k - 2, j, i);
+        };
+
+        // Another free function -- might need this for momentum criteria
+        auto compute_d4u = [](const Real qp2, const Real qp1, const Real q,
+                              const Real qm1, const Real qm2) {
+          return qp2 - 4.0 * qp1 + 6.0 * q - 4.0 * qm1 + qm2;
+        };
+
+        // Grid refinement flag
+        int &flag = refine_flag.d_view(m + mbs);
+        bool flag_coarsen = true;
+
+        // Error measure reduced within a single MB
+        Real team_abs_d4u_over_u_max = 0.0;
+        
+        // Spectral norm method: check the evolved density variable
+        Kokkos::parallel_reduce(
+            Kokkos::TeamThreadRange(tmember, nkji),
+            [=](const int idx, Real &max_error) {
+              int k = (idx) / nji;
+              int j = (idx - k * nji) / nx1;
+              int i = (idx - k * nji - j * nx1) + is;
+              j += js;
+              k += ks;
+
+              Real abs_d4u_over_u{0.0};
+
+              // @yk: monitor the AMR criteria only when rho > rho_floor
+              if (u0(m, IDN, k, j, i) > dfloor) {
+                abs_d4u_over_u = fabs(compute_d4u_x_axis(m, IDN, k, j, i));
+
+                if (multi_d) {
+                  if (spectral_norm_error_policy ==
+                      error_policy_for_multi_dim::sum) {
+                    abs_d4u_over_u += fabs(compute_d4u_y_axis(m, IDN, k, j, i));
+                  } else {
+                    abs_d4u_over_u =
+                        fmax(abs_d4u_over_u,
+                             fabs(compute_d4u_y_axis(m, IDN, k, j, i)));
+                  }
+                }
+
+                if (three_d) {
+                  if (spectral_norm_error_policy ==
+                      error_policy_for_multi_dim::sum) {
+                    abs_d4u_over_u += fabs(compute_d4u_z_axis(m, IDN, k, j, i));
+                  } else {
+                    abs_d4u_over_u =
+                        fmax(abs_d4u_over_u,
+                             fabs(compute_d4u_z_axis(m, IDN, k, j, i)));
+                  }
+                }
+
+                // normalize with the local value at (i,j,k)
+                abs_d4u_over_u /= u0(m, IDN, k, j, i);
+              }
+
+              max_error = fmax(max_error, abs_d4u_over_u);
+            },
+            Kokkos::Max<Real>(team_abs_d4u_over_u_max));
+
+        if (team_abs_d4u_over_u_max > thres_refine) {
+          flag = 1;
+          return;
+        }
+        flag_coarsen =
+            flag_coarsen and (team_abs_d4u_over_u_max < thres_coarsen);
+
+        // Spectral norm method: check the magnitude of the momentum
+        //
+        // @yk: this check is a bit expensive and has a less well-defined scale
+        // of values (e.g. velocity can be very small and there is nothing wrong
+        // with that). Will be good if we do not use this, or consider
+        // monitoring pressure instead?
+        if (monitor_momentum) {
+          Kokkos::parallel_reduce(
+              Kokkos::TeamThreadRange(tmember, nkji),
+              [=](const int idx, Real &max_error) {
+                int k = (idx) / nji;
+                int j = (idx - k * nji) / nx1;
+                int i = (idx - k * nji - j * nx1) + is;
+                j += js;
+                k += ks;
+
+                Real abs_d4u_over_u{0.0};
+
+                // @yk: monitor the AMR criteria only when rho > rho_floor
+                if (u0(m, IDN, k, j, i) > dfloor) {
+
+                  auto get_momentum_magnitude =
+                      [&u0, &multi_d, &three_d](const int m, const int k,
+                                                const int j, const int i) {
+                        if (three_d) {
+                          return std::sqrt(SQR(u0(m, IM1, k, j, i)) +
+                                           SQR(u0(m, IM2, k, j, i)) +
+                                           SQR(u0(m, IM3, k, j, i)));
+
+                        } else if (multi_d) {
+                          return std::sqrt(SQR(u0(m, IM1, k, j, i)) +
+                                           SQR(u0(m, IM2, k, j, i)));
+                        } else {
+                          return fabs(u0(m, IM1, k, j, i));
+                        }
+                      };
+
+                  abs_d4u_over_u =
+                      fabs(compute_d4u(get_momentum_magnitude(m, k, j, i + 2),
+                                       get_momentum_magnitude(m, k, j, i + 1),
+                                       get_momentum_magnitude(m, k, j, i),
+                                       get_momentum_magnitude(m, k, j, i - 1),
+                                       get_momentum_magnitude(m, k, j, i - 2)));
+
+                  if (multi_d) {
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u_over_u += fabs(
+                          compute_d4u(get_momentum_magnitude(m, k, j + 2, i),
+                                      get_momentum_magnitude(m, k, j + 1, i),
+                                      get_momentum_magnitude(m, k, j, i),
+                                      get_momentum_magnitude(m, k, j - 1, i),
+                                      get_momentum_magnitude(m, k, j - 2, i)));
+                    } else {
+                      abs_d4u_over_u =
+                          fmax(abs_d4u_over_u,
+                               fabs(compute_d4u(
+                                   get_momentum_magnitude(m, k, j + 2, i),
+                                   get_momentum_magnitude(m, k, j + 1, i),
+                                   get_momentum_magnitude(m, k, j, i),
+                                   get_momentum_magnitude(m, k, j - 1, i),
+                                   get_momentum_magnitude(m, k, j - 2, i))));
+                    }
+                  }
+
+                  if (three_d) {
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u_over_u += fabs(
+                          compute_d4u(get_momentum_magnitude(m, k + 2, j, i),
+                                      get_momentum_magnitude(m, k + 1, j, i),
+                                      get_momentum_magnitude(m, k, j, i),
+                                      get_momentum_magnitude(m, k - 1, j, i),
+                                      get_momentum_magnitude(m, k - 2, j, i)));
+                    } else {
+                      abs_d4u_over_u =
+                          fmax(abs_d4u_over_u,
+                               fabs(compute_d4u(
+                                   get_momentum_magnitude(m, k + 2, j, i),
+                                   get_momentum_magnitude(m, k + 1, j, i),
+                                   get_momentum_magnitude(m, k, j, i),
+                                   get_momentum_magnitude(m, k - 1, j, i),
+                                   get_momentum_magnitude(m, k - 2, j, i))));
+                    }
+                  }
+
+                  // normalize with the local value at (i,j,k)
+                  abs_d4u_over_u /=
+                      (get_momentum_magnitude(m, k, j, i) +
+                       1e-15); // @yk: this epsilon value to avoid div-by-zero
+                               // may be implemented in a better way
+                }
+
+                max_error = fmax(max_error, abs_d4u_over_u);
+              },
+              Kokkos::Max<Real>(team_abs_d4u_over_u_max));
+
+          if (team_abs_d4u_over_u_max > thres_refine) {
+            flag = 1;
+            return;
+          }
+          flag_coarsen =
+              flag_coarsen and (team_abs_d4u_over_u_max < thres_coarsen);
+        }
+
+        if (monitor_energy) {
+          // Spectral norm method: check the evolved energy variable
+          Kokkos::parallel_reduce(
+              Kokkos::TeamThreadRange(tmember, nkji),
+              [=](const int idx, Real &max_error) {
+                int k = (idx) / nji;
+                int j = (idx - k * nji) / nx1;
+                int i = (idx - k * nji - j * nx1) + is;
+                j += js;
+                k += ks;
+
+                Real abs_d4u_over_u{0.0};
+
+                // @yk: monitor the AMR criteria only when e > e_floor
+                if (u0(m, IEN, k, j, i) > efloor) {
+                  abs_d4u_over_u = fabs(compute_d4u_x_axis(m, IEN, k, j, i));
+
+                  if (multi_d) {
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u_over_u +=
+                          fabs(compute_d4u_y_axis(m, IEN, k, j, i));
+                    } else {
+                      abs_d4u_over_u =
+                          fmax(abs_d4u_over_u,
+                               fabs(compute_d4u_y_axis(m, IEN, k, j, i)));
+                    }
+                  }
+
+                  if (three_d) {
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u_over_u +=
+                          fabs(compute_d4u_z_axis(m, IEN, k, j, i));
+                    } else {
+                      abs_d4u_over_u =
+                          fmax(abs_d4u_over_u,
+                               fabs(compute_d4u_z_axis(m, IEN, k, j, i)));
+                    }
+                  }
+
+                  // normalize with the local value at (i,j,k)
+                  abs_d4u_over_u /= u0(m, IEN, k, j, i);
+                }
+
+                max_error = fmax(max_error, abs_d4u_over_u);
+              },
+              Kokkos::Max<Real>(team_abs_d4u_over_u_max));
+
+          if (team_abs_d4u_over_u_max > thres_refine) {
+            flag = 1;
+            return;
+          }
+          flag_coarsen =
+              flag_coarsen and (team_abs_d4u_over_u_max < thres_coarsen);
+        }
+
+        
+        // Spectral norm method: check the magnitude of B field
+        
+        if (monitor_magnetic_field) {
+          Kokkos::parallel_reduce(
+              Kokkos::TeamThreadRange(tmember, nkji),
+              [=](const int idx, Real &max_error) {
+                int k = (idx) / nji;
+                int j = (idx - k * nji) / nx1;
+                int i = (idx - k * nji - j * nx1) + is;
+                j += js;
+                k += ks;
+                
+                Real abs_d4u_over_u{0.0};
+
+                // @yk: monitor the AMR criteria only when rho > rho_floor
+                if (u0(m, IDN, k, j, i) > dfloor) {
+
+                auto get_magnetic_field_magnitude =
+                    [&bcc, &multi_d, &three_d](const int m, const int k,
+                                               const int j, const int i) {
+                      if (three_d) {
+                        return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
+                                         SQR(bcc(m, IBY, k, j, i)) +
+                                         SQR(bcc(m, IBZ, k, j, i)));
+
+                      } else if (multi_d) {
+                        return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
+                                         SQR(bcc(m, IBY, k, j, i)));
+                      } else {
+                        return fabs(bcc(m, IBX, k, j, i));
+                      }
+                    };
+
+                  abs_d4u_over_u = fabs(compute_d4u(
+                      get_magnetic_field_magnitude(m, k, j, i + 2),
+                      get_magnetic_field_magnitude(m, k, j, i + 1),
+                      get_magnetic_field_magnitude(m, k, j, i),
+                      get_magnetic_field_magnitude(m, k, j, i - 1),
+                      get_magnetic_field_magnitude(m, k, j, i - 2)));
+
+                  if (multi_d) {
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u_over_u += fabs(compute_d4u(
+                          get_magnetic_field_magnitude(m, k, j + 2, i),
+                          get_magnetic_field_magnitude(m, k, j + 1, i),
+                          get_magnetic_field_magnitude(m, k, j, i),
+                          get_magnetic_field_magnitude(m, k, j - 1, i),
+                          get_magnetic_field_magnitude(m, k, j - 2, i)));
+                    } else {
+                      abs_d4u_over_u = fmax(
+                          abs_d4u_over_u,
+                          fabs(compute_d4u(
+                              get_magnetic_field_magnitude(m, k, j + 2, i),
+                              get_magnetic_field_magnitude(m, k, j + 1, i),
+                              get_magnetic_field_magnitude(m, k, j, i),
+                              get_magnetic_field_magnitude(m, k, j - 1, i),
+                              get_magnetic_field_magnitude(m, k, j - 2, i))));
+                    }
+                  }
+
+                  if (three_d) {
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u_over_u += fabs(compute_d4u(
+                          get_magnetic_field_magnitude(m, k + 2, j, i),
+                          get_magnetic_field_magnitude(m, k + 1, j, i),
+                          get_magnetic_field_magnitude(m, k, j, i),
+                          get_magnetic_field_magnitude(m, k - 1, j, i),
+                          get_magnetic_field_magnitude(m, k - 2, j, i)));
+                    } else {
+                      abs_d4u_over_u = fmax(
+                          abs_d4u_over_u,
+                          fabs(compute_d4u(
+                              get_magnetic_field_magnitude(m, k + 2, j, i),
+                              get_magnetic_field_magnitude(m, k + 1, j, i),
+                              get_magnetic_field_magnitude(m, k, j, i),
+                              get_magnetic_field_magnitude(m, k - 1, j, i),
+                              get_magnetic_field_magnitude(m, k - 2, j, i))));
+                    }
+                  }
+
+                  // normalize with the local value at (i,j,k)
+                  abs_d4u_over_u /=
+                      (get_magnetic_field_magnitude(m, k, j, i) +
+                       1e-15); // @yk: this epsilon value to avoid div-by-zero
+                               // may be implemented in a better way
+                }
+
+                max_error = fmax(max_error, abs_d4u_over_u);
+              },
+              Kokkos::Max<Real>(team_abs_d4u_over_u_max));
+
+          if (team_abs_d4u_over_u_max > thres_refine) {
+            flag = 1;
+            return;
+          }
+          flag_coarsen =
+              flag_coarsen and (team_abs_d4u_over_u_max < thres_coarsen);
+        }
+
+        // only derefine when flag has not been set by other criteria
+        if (flag_coarsen && (flag == 0)) {
+          flag = -1;
+        }
+      });
+
+  // sync device array with host
+  refine_flag.template modify<DevExeSpace>();
+  refine_flag.template sync<HostMemSpace>();
   return;
 }

@@ -23,7 +23,6 @@
 #include "eos/eos.hpp"
 #include "mhd/mhd.hpp"
 #include "pgen/pgen.hpp"
-
 //----------------------------------------------------------------------------------------
 //! \fn Real A3(const Real x1,const Real x2,const Real x3)
 //  \brief A3: 3-component of vector potential
