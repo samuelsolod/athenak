@@ -260,28 +260,48 @@ void RefinementCondition(MeshBlockPack *pmbp) {
               j += js;
               k += ks;
 
-              // ensure that we are not at the boundary of the MeshBlock to avoid out of bounds
-              if (i > is+1 && i < ie-1 && j > js+1 && j < je-1) {
-                Real rho = w0(m, IDN, k, j, i);
-                Real pres = w0(m, IPR, k, j, i);
+              Real rho = w0(m, IDN, k, j, i);
+              Real pres = w0(m, IPR, k, j, i);
 
-                // Second derivative in x (central difference)
-                Real d2dx_rho = (-2.0 * rho + w0(m, IDN, k, j, i+1) + w0(m, IDN, k, j, i-1)) / SQR(dx1);
-                Real d2dx_pres = (-2.0 * pres + w0(m, IPR, k, j, i+1) + w0(m, IPR, k, j, i-1)) / SQR(dx1);
+              // Second derivative in x 
+              Real d2dx_rho, d2dx_pres;
+              if (i == is) {
+                // forward difference in x
+                d2dx_rho = (rho - 2.0 * w0(m, IDN, k, j, i + 1) + w0(m, IDN, k, j, i + 2)) / SQR(dx1);
+                d2dx_pres = (pres - 2.0 * w0(m, IPR, k, j, i + 1) + w0(m, IPR, k, j, i + 2)) / SQR(dx1);
+              } else if (i == ie) {
+                // backward difference in x
+                d2dx_rho = (rho - 2.0 * w0(m, IDN, k, j, i - 1) + w0(m, IDN, k, j, i - 2)) / SQR(dx1);
+                d2dx_pres = (pres - 2.0 * w0(m, IPR, k, j, i - 1) + w0(m, IPR, k, j, i - 2)) / SQR(dx1);
+              } else {
+                // central difference in x
+                d2dx_rho = (-2.0 * rho + w0(m, IDN, k, j, i + 1) + w0(m, IDN, k, j, i - 1)) / SQR(dx1);
+                d2dx_pres = (-2.0 * pres + w0(m, IPR, k, j, i + 1) + w0(m, IPR, k, j, i - 1)) / SQR(dx1);
+              }
 
-                // Second derivative in y (central difference)
-                Real d2dy_rho = (-2.0 * rho + w0(m, IDN, k, j+1, i) + w0(m, IDN, k, j-1, i)) / SQR(dx2);
-                Real d2dy_pres = (-2.0 * pres + w0(m, IPR, k, j+1, i) + w0(m, IPR, k, j-1, i)) / SQR(dx2);
+              // Second derivative in y 
+              Real d2dy_rho, d2dy_pres;
+              if (j == js) {
+                // forward difference in y
+                d2dy_rho = (rho - 2.0 * w0(m, IDN, k, j + 1, i) + w0(m, IDN, k, j + 2, i)) / SQR(dx2);
+                d2dy_pres = (pres - 2.0 * w0(m, IPR, k, j + 1, i) + w0(m, IPR, k, j + 2, i)) / SQR(dx2);
+              } else if (j == je) {
+                // backward difference in y
+                d2dy_rho = (rho - 2.0 * w0(m, IDN, k, j - 1, i) + w0(m, IDN, k, j - 2, i)) / SQR(dx2);
+                d2dy_pres = (pres - 2.0 * w0(m, IPR, k, j - 1, i) + w0(m, IPR, k, j - 2, i)) / SQR(dx2);
+              } else {
+                // central difference in y
+                d2dy_rho = (-2.0 * rho + w0(m, IDN, k, j + 1, i) + w0(m, IDN, k, j - 1, i)) / SQR(dx2);
+                d2dy_pres = (-2.0 * pres + w0(m, IPR, k, j + 1, i) + w0(m, IPR, k, j - 1, i)) / SQR(dx2);
+              }
 
-                // compute curvature indicator using equation (72) from Matsumoto (2007)
-                Real curvature_rho = fabs(SQR(dx1) * d2dx_rho + SQR(dx2) * d2dy_rho) / rho;
-                Real curvature_pres = fabs(SQR(dx1) * d2dx_pres + SQR(dx2) * d2dy_pres) / pres;
+              // Compute curvature indicator (Matsumoto 2007 eq. 72)
+              Real curvature_rho = fabs(SQR(dx1) * d2dx_rho + SQR(dx2) * d2dy_rho) / rho;
+              Real curvature_pres = fabs(SQR(dx1) * d2dx_pres + SQR(dx2) * d2dy_pres) / pres;
 
-                // choose the maximum curvature value between density and pressure
-                max_curve = fmax(curvature_rho, curvature_pres);
-              } 
-                // max-curve is the local curvature value for the current cell in the parrallell loop
-                // Kokkos::Max find the maximum curvature over the entire meshblock
+              max_curve = fmax(max_curve, fmax(curvature_rho, curvature_pres));
+              // max-curve is the local curvature value for the current cell in the parrallell loop
+              // Kokkos::Max find the maximum curvature over the entire meshblock
             },Kokkos::Max<Real>(curve_indicator));
 
             // check if the curve_indicator exceeds the threshold
