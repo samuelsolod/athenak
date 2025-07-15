@@ -294,8 +294,6 @@ void RefinementCondition(MeshBlockPack *pmbp) {
                 kappa3 += c[j] * c[j] / (2.0 * j + 1);
               }
               kappa3_hat *= 1.0 / 5.0;
-              // multiply by N^(2*beta_N) where beta_N = 4, N = 2... see equation (9) in Deppe 2023
-              kappa3_hat *= 256.0;
 
               // extract kappa3_hat and kappa3 from parallel reduction
               max_cN = fmax(kappa3_hat, max_cN);
@@ -333,8 +331,6 @@ void RefinementCondition(MeshBlockPack *pmbp) {
                 kappa3 += c[j] * c[j] / (2.0 * j + 1);
               }
               kappa3_hat *= 1.0 / 9.0;
-              // multiply by N^(2*beta_N) where beta_N = 4, N = 4... see equation (9) in Deppe 2023
-              kappa3_hat *= 65536.0;
 
               max_cN = fmax(kappa3_hat, max_cN);
               max_sum_cN = fmax(kappa3, max_sum_cN);
@@ -343,11 +339,33 @@ void RefinementCondition(MeshBlockPack *pmbp) {
           }, Kokkos::Max<Real>(cN), Kokkos::Max<Real>(sum_cN));
 
         // check if the Nth degree power exceeds the sum of powers
-        if (cN > sum_cN) {
-          refine_flag_.d_view(m + mbs) = 1;
+        Real alpha_refine = 4.0;
+        Real alpha_coarsen = 5.0;
+
+        if (stencil_ == 3) {
+          Real N = 2.0;
+          Real threshold_refine = pow(2.0 * alpha_refine, N);
+          Real threshold_coarsen = pow(2.0 * alpha_coarsen, N);
+
+          if (cN * threshold_refine > sum_cN) {
+            refine_flag_.d_view(m + mbs) = 1;
+          }
+          if (cN * threshold_coarsen < sum_cN) {
+            refine_flag_.d_view(m + mbs) = -1;
+          }
         }
-        if (cN < sum_cN) {
-          refine_flag_.d_view(m + mbs) = -1;
+
+        if (stencil_ == 5) {
+          Real N = 4.0;
+          Real threshold_refine = pow(2.0 * alpha_refine, N);
+          Real threshold_coarsen = pow(2.0 * alpha_coarsen, N);
+
+          if (cN * threshold_refine > sum_cN) {
+            refine_flag_.d_view(m + mbs) = 1;
+          }
+          if (cN * threshold_coarsen < sum_cN) {
+            refine_flag_.d_view(m + mbs) = -1;
+          }
         }
       });
   }
