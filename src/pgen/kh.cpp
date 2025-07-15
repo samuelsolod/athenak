@@ -350,7 +350,7 @@ void RefinementCondition(MeshBlockPack *pmbp) {
           if (cN * threshold_refine > sum_cN) {
             refine_flag_.d_view(m + mbs) = 1;
           }
-          if (cN * threshold_coarsen > sum_cN) {
+          if (cN * threshold_coarsen < sum_cN) {
             refine_flag_.d_view(m + mbs) = -1;
           }
         }
