@@ -289,13 +289,11 @@ void RefinementCondition(MeshBlockPack *pmbp) {
               }
 
               // compute (c_N)^2 and sum_0^N((c_n)^2)... see equation (9) in Deppe 2023
-              Real kappa3_hat = 0.0;
               Real kappa3 = 0.0;
               for (int j = 0; j < 3; ++j) {
-                kappa3_hat += c[j] * c[j];
                 kappa3 += c[j] * c[j] / (2.0 * j + 1);
               }
-              kappa3_hat *= 1.0 / 5.0;
+              Real kappa3_hat = c[2] * c[2] / 5.0;
 
               // extract kappa3_hat and kappa3 from parallel reduction
               max_cN = fmax(kappa3_hat, max_cN);
@@ -326,13 +324,11 @@ void RefinementCondition(MeshBlockPack *pmbp) {
                   c[j] += A[j][i] * u[i];
                 }
               }
-              Real kappa3_hat = 0.0;
               Real kappa3 = 0.0;
               for (int j = 0; j < 5; ++j) {
-                kappa3_hat += c[j] * c[j];
                 kappa3 += c[j] * c[j] / (2.0 * j + 1);
               }
-              kappa3_hat *= 1.0 / 9.0;
+              Real kappa3_hat = c[4] * c[4] / 9.0;
 
               max_cN = fmax(kappa3_hat, max_cN);
               max_sum_cN = fmax(kappa3, max_sum_cN);
