@@ -270,7 +270,7 @@ void RefinementCondition(MeshBlockPack *pmbp) {
               // create array of solution values and initialize modal coeffiecent array
               Real u[3], c[3]; 
               u[0] = u0; u[1] = u1; u[2] = u2;
-              for (int k = 0; k<3; i++) {c[k] = 0.0;}
+              for (int k = 0; k<3; k++) {c[k] = 0.0;}
 
               // 3x3 Legendre coefficent matrix A
               Real A[3][3] = {
