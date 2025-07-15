@@ -53,7 +53,9 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   dd_threshold_(0.0),
   dp_threshold_(0.0),
   dv_threshold_(0.0),
-  curve_threshold(0.0),
+  max_curve_threshold_(0.0),
+  min_curve_threshold_(0.0),
+  stencil_(0.0),
   check_cons_(false) {
   if (pin->DoesBlockExist("mesh_refinement")) {
     // read interval (in cycles) between check of AMR and derefinement
@@ -81,7 +83,15 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
       check_cons_ = true;
     }
     if (pin->DoesParameterExist("mesh_refinement", "curve_max")) {
-      curve_threshold = pin->GetReal("mesh_refinement", "curve_max");
+      max_curve_threshold_ = pin->GetReal("mesh_refinement", "curve_max");
+      check_cons_ = true;
+    }
+    if (pin->DoesParameterExist("mesh_refinement", "curve_min")) {
+      min_curve_threshold_ = pin->GetReal("mesh_refinement", "curve_min");
+      check_cons_ = true;
+    }
+    if (pin->DoesParameterExist("mesh_refinement", "stencil_order")) {
+      stencil_ = pin->GetReal("mesh_refinement", "stencil_order");
       check_cons_ = true;
     }
   }
@@ -173,7 +183,9 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
 //! User-defined refinement conditions can also be enrolled by setting the *usr_ref_func
 //! pointer in the problem generator.
 //! User defined refinement condtions: 
-//!   (1) curve_threshold: normalized curvature of local density and pressure
+//!    max_curve_threshold: maximum normalized curvature 
+//!    min_curve_threshold: minimum normalized curvature 
+//!    stencil: order of the stencil used for power monitor
 
 void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   // reallocate and zero refine_flag in host space and sync with device

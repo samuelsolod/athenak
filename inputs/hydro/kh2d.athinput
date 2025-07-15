@@ -35,13 +35,15 @@ nx3       = 1           # Number of cells in each MeshBlock, X3-dir
 
 
 <mesh_refinement>
-# refinement = adaptive
-# num_levels = 4
-# dpres_max  = 0.05
-# ddens_max   = 0.3
-# refinement_interval = 10
-# max_nmb_per_rank = 8192 
+refinement = adaptive
+num_levels = 4
+refinement_interval = 10
+max_nmb_per_rank = 8192 
+# dpres_max = 0.05
+# ddens_max = 0.3
 # curve_max = 0.1
+# curve_min = 0.001
+stencil_order = 3
 
 
 <time>
