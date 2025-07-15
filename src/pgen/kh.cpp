@@ -237,6 +237,8 @@ void RefinementCondition(MeshBlockPack *pmbp) {
 
   // get preferred stencil order from MeshRefinement via mesh pointer
   const Real stencil_ = pm->pmr->GetStencilOrder();
+  const Real alpha_refine_ = pm->pmr->GetAlphaRefine();
+  const Real alpha_coarsen_ = pm->pmr->GetAlphaCoarsen();
 
   // check if hydro or mhd is active for this MeshBlockPack
   if ((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) {
@@ -339,26 +341,24 @@ void RefinementCondition(MeshBlockPack *pmbp) {
           }, Kokkos::Max<Real>(cN), Kokkos::Max<Real>(sum_cN));
 
         // check if the Nth degree power exceeds the sum of powers
-        Real alpha_refine = 4.0;
-        Real alpha_coarsen = 5.0;
 
         if (stencil_ == 3) {
           Real N = 2.0;
-          Real threshold_refine = pow(2.0 * alpha_refine, N);
-          Real threshold_coarsen = pow(2.0 * alpha_coarsen, N);
+          Real threshold_refine = pow(2.0 * alpha_refine_, N);
+          Real threshold_coarsen = pow(2.0 * alpha_coarsen_, N);
 
           if (cN * threshold_refine > sum_cN) {
             refine_flag_.d_view(m + mbs) = 1;
           }
-          if (cN * threshold_coarsen < sum_cN) {
+          if (cN * threshold_coarsen > sum_cN) {
             refine_flag_.d_view(m + mbs) = -1;
           }
         }
 
         if (stencil_ == 5) {
           Real N = 4.0;
-          Real threshold_refine = pow(2.0 * alpha_refine, N);
-          Real threshold_coarsen = pow(2.0 * alpha_coarsen, N);
+          Real threshold_refine = pow(2.0 * alpha_refine_, N);
+          Real threshold_coarsen = pow(2.0 * alpha_coarsen_, N);
 
           if (cN * threshold_refine > sum_cN) {
             refine_flag_.d_view(m + mbs) = 1;
