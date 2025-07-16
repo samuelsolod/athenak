@@ -236,7 +236,7 @@ void RefinementCondition(MeshBlockPack *pmbp) {
   int mbs = pm->gids_eachrank[global_variable::my_rank];
 
   // get preferred stencil order from MeshRefinement via mesh pointer
-  const Real stencil_ = pm->pmr->GetStencilOrder();
+  const int stencil_ = pm->pmr->GetStencilOrder();
   const Real alpha_refine_ = pm->pmr->GetAlphaRefine();
   const Real alpha_coarsen_ = pm->pmr->GetAlphaCoarsen();
 
@@ -253,7 +253,7 @@ void RefinementCondition(MeshBlockPack *pmbp) {
     par_for_outer("ConsRefineCond", DevExeSpace(), 0, 0, 0, nmb - 1,
       KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
         Real cN = 0.0;
-        Real sum_cN =0.0;
+        Real sum_cN = 0.0;
         // loop over all of the cells in the MeshBlock in parallel
         Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
           [=](const int idx, Real &max_cN, Real &max_sum_cN) {
@@ -265,14 +265,21 @@ void RefinementCondition(MeshBlockPack *pmbp) {
 
             if (stencil_ == 3) {
               // solution values for cells of interest for 3-point stencil
-              Real u0 = w0(m, IDN, k, j, i - 1);
               Real u1 = w0(m, IDN, k, j, i);
-              Real u2 = w0(m, IDN, k, j, i + 1); 
+
+              Real u0x = w0(m, IDN, k, j, i - 1);
+              Real u2x = w0(m, IDN, k, j, i + 1); 
+
+              Real u0y = w0(m, IDN, k, j - 1, i);
+              Real u2y = w0(m, IDN, k, j + 1, i); 
 
               // create array of solution values and initialize modal coeffiecent array
-              Real u[3], c[3]; 
-              u[0] = u0; u[1] = u1; u[2] = u2;
-              for (int k = 0; k<3; k++) {c[k] = 0.0;}
+              Real ux[3], uy[3], cx[3], cy[3]; 
+              ux[0] = u0x; ux[1] = u1; ux[2] = u2x;
+              uy[0] = u0y; uy[1] = u1; uy[2] = u2y;
+
+              for (int ii = 0; ii<3; ii++) {cx[ii] = 0.0;}
+              for (int ii = 0; ii<3; ii++) {cy[ii] = 0.0;}
 
               // 3x3 Legendre coefficent matrix A
               Real A[3][3] = {
@@ -282,18 +289,25 @@ void RefinementCondition(MeshBlockPack *pmbp) {
               };
 
               // A * u = c
-              for (int j = 0; j < 3; ++j) {
-                for (int i = 0; i < 3; ++i) {
-                  c[j] += A[j][i] * u[i];
+              for (int row = 0; row < 3; ++row) {
+                for (int col = 0; col < 3; ++col) {
+                  cx[row] += A[row][col] * ux[col];
+                  cy[row] += A[row][col] * uy[col];
                 }
               }
 
               // compute (c_N)^2 and sum_0^N((c_n)^2)... see equation (9) in Deppe 2023
-              Real kappa3 = 0.0;
-              for (int j = 0; j < 3; ++j) {
-                kappa3 += c[j] * c[j] / (2.0 * j + 1);
+              Real kappa3x = 0.0;
+              Real kappa3y = 0.0;
+              for (int jj = 0; jj < 3; ++jj) {
+                kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
+                kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
               }
-              Real kappa3_hat = c[2] * c[2] / 5.0;
+              Real kappa3x_hat = cx[2] * cx[2] / 5.0;
+              Real kappa3y_hat = cy[2] * cy[2] / 5.0;
+
+              Real kappa3 = fmax(kappa3x, kappa3y);
+              Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
 
               // extract kappa3_hat and kappa3 from parallel reduction
               max_cN = fmax(kappa3_hat, max_cN);
@@ -301,15 +315,24 @@ void RefinementCondition(MeshBlockPack *pmbp) {
             }
 
             if (stencil_ == 5) {
-              Real u0 = w0(m, IDN, k, j, i - 2);
-              Real u1 = w0(m, IDN, k, j, i - 1);
               Real u2 = w0(m, IDN, k, j, i);
-              Real u3 = w0(m, IDN, k, j, i + 1);
-              Real u4 = w0(m, IDN, k, j, i + 2);
 
-              Real u[5], c[5]; 
-              u[0] = u0; u[1] = u1; u[2] = u2; u[3] = u3; u[4] = u4;
-              for (int k = 0; k<5; k++) {c[k] = 0.0;}
+              Real u0x = w0(m, IDN, k, j, i - 2);
+              Real u1x = w0(m, IDN, k, j, i - 1);
+              Real u3x = w0(m, IDN, k, j, i + 1);
+              Real u4x = w0(m, IDN, k, j, i + 2);
+
+              Real u0y = w0(m, IDN, k, j - 2, i);
+              Real u1y = w0(m, IDN, k, j - 1, i);
+              Real u3y = w0(m, IDN, k, j + 1, i);
+              Real u4y = w0(m, IDN, k, j + 2, i);
+
+              Real ux[5], uy[5], cx[5], cy[5]; 
+              ux[0] = u0x; ux[1] = u1x; ux[2] = u2; ux[3] = u3x; ux[4] = u4x;
+              uy[0] = u0y; uy[1] = u1y; uy[2] = u2; uy[3] = u3y; uy[4] = u4y;
+
+              for (int kk = 0; kk<5; kk++) {cx[kk] = 0.0;}
+              for (int kk = 0; kk<5; kk++) {cy[kk] = 0.0;}
 
               Real A[5][5] = {
                   {275.0/115.0,     25.0/288.0,     67.0/192.0,     25.0/288.0,     275.0/1152.0},
@@ -319,16 +342,24 @@ void RefinementCondition(MeshBlockPack *pmbp) {
                   {125.0/336.0,     -125.0/84.0,    125.0/56.0,     -125.0/84.0,    125.0/336.0}
               };
 
-              for (int j = 0; j < 5; ++j) {
-                for (int i = 0; i < 5; ++i) {
-                  c[j] += A[j][i] * u[i];
+              for (int row = 0; row < 5; ++row) {
+                for (int col = 0; col < 5; ++col) {
+                  cx[row] += A[row][col] * ux[col];
+                  cy[row] += A[row][col] * uy[col];
                 }
               }
-              Real kappa3 = 0.0;
-              for (int j = 0; j < 5; ++j) {
-                kappa3 += c[j] * c[j] / (2.0 * j + 1);
+
+              Real kappa3x = 0.0;
+              Real kappa3y = 0.0;
+              for (int jj = 0; jj < 5; ++jj) {
+                kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
+                kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
               }
-              Real kappa3_hat = c[4] * c[4] / 9.0;
+              Real kappa3x_hat = cx[4] * cx[4] / 9.0;
+              Real kappa3y_hat = cy[4] * cy[4] / 9.0;
+
+              Real kappa3 = fmax(kappa3x, kappa3y);
+              Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
 
               max_cN = fmax(kappa3_hat, max_cN);
               max_sum_cN = fmax(kappa3, max_sum_cN);
@@ -340,8 +371,8 @@ void RefinementCondition(MeshBlockPack *pmbp) {
 
         if (stencil_ == 3) {
           Real N = 2.0;
-          Real threshold_refine = pow(2.0 * alpha_refine_, N);
-          Real threshold_coarsen = pow(2.0 * alpha_coarsen_, N);
+          Real threshold_refine = pow(N, 2.0 * alpha_refine_);
+          Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen_);
 
           if (cN * threshold_refine > sum_cN) {
             refine_flag_.d_view(m + mbs) = 1;
@@ -353,8 +384,8 @@ void RefinementCondition(MeshBlockPack *pmbp) {
 
         if (stencil_ == 5) {
           Real N = 4.0;
-          Real threshold_refine = pow(2.0 * alpha_refine_, N);
-          Real threshold_coarsen = pow(2.0 * alpha_coarsen_, N);
+          Real threshold_refine = pow(N, 2.0 * alpha_refine_);
+          Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen_);
 
           if (cN * threshold_refine > sum_cN) {
             refine_flag_.d_view(m + mbs) = 1;
