@@ -93,7 +93,7 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
       check_cons_ = true;
     }
     if (pin->DoesParameterExist("mesh_refinement", "stencil_order")) {
-      stencil_ = pin->GetReal("mesh_refinement", "stencil_order");
+      stencil_ = pin->GetInteger("mesh_refinement", "stencil_order");
       check_cons_ = true;
     }
     if (pin->DoesParameterExist("mesh_refinement", "alpha_refine")) {
