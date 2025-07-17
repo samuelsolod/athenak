@@ -55,9 +55,10 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   dv_threshold_(0.0),
   max_curve_threshold_(0.0),
   min_curve_threshold_(0.0),
-  stencil_(0.0),
+  stencil_(0),
   alpha_refine_(0.0),
   alpha_coarsen_(0.0),
+  variable_(0),
   check_cons_(false) {
   if (pin->DoesBlockExist("mesh_refinement")) {
     // read interval (in cycles) between check of AMR and derefinement
@@ -102,6 +103,10 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
     }
     if (pin->DoesParameterExist("mesh_refinement", "alpha_coarsen")) {
       alpha_coarsen_ = pin->GetReal("mesh_refinement", "alpha_coarsen");
+      check_cons_ = true;
+    }
+    if (pin->DoesParameterExist("mesh_refinement", "variable")) {
+      variable_ = pin->GetInteger("mesh_refinement", "variable");
       check_cons_ = true;
     }
   }
@@ -195,9 +200,12 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
 //! User defined refinement condtions: 
 //!    max_curve_threshold: maximum normalized curvature 
 //!    min_curve_threshold: minimum normalized curvature 
-//!    stencil: order of the stencil used for power monitor
-//!    alpha_refine: alpha_N threshold for refinement
-//!    alpha_coarsen: alpha_N threshold for coarsening
+//!    stencil_: order of the stencil used for power monitor
+//!    alpha_refine_: alpha_N threshold for refinement
+//!    alpha_coarsen_: alpha_N threshold for coarsening
+//!    variable_: variable to do power moniter on
+//!               - 1: density
+//!               - 2: velocity
 
 void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   // reallocate and zero refine_flag in host space and sync with device

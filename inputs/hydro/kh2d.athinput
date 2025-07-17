@@ -44,6 +44,7 @@ max_nmb_per_rank = 8192
 # curve_max = 0.1
 # curve_min = 0.001
 stencil_order = 3
+variable = 1        # 1 = density, 2 = velocity
 
 
 <time>

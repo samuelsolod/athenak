@@ -239,6 +239,7 @@ void RefinementCondition(MeshBlockPack *pmbp) {
   const int stencil_ = pm->pmr->GetStencilOrder();
   const Real alpha_refine_ = pm->pmr->GetAlphaRefine();
   const Real alpha_coarsen_ = pm->pmr->GetAlphaCoarsen();
+  const int variable = pm->pmr->GetVariable();
 
   // check if hydro or mhd is active for this MeshBlockPack
   if ((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) {
@@ -265,13 +266,25 @@ void RefinementCondition(MeshBlockPack *pmbp) {
 
             if (stencil_ == 3) {
               // solution values for cells of interest for 3-point stencil
-              Real u1 = w0(m, IDN, k, j, i);
+              Real u1, u0x, u2x, u0y, u2y;
+              if (variable == 1) {
+                u1 = w0(m, IDN, k, j, i);
 
-              Real u0x = w0(m, IDN, k, j, i - 1);
-              Real u2x = w0(m, IDN, k, j, i + 1); 
+                u0x = w0(m, IDN, k, j, i - 1);
+                u2x = w0(m, IDN, k, j, i + 1); 
 
-              Real u0y = w0(m, IDN, k, j - 1, i);
-              Real u2y = w0(m, IDN, k, j + 1, i); 
+                u0y = w0(m, IDN, k, j - 1, i);
+                u2y = w0(m, IDN, k, j + 1, i); 
+              }
+              if (variable == 2) {
+                u1 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
+
+                u0x = std::sqrt(SQR(w0(m, IVX, k, j, i-1)) + SQR(w0(m, IVY, k, j, i-1)));
+                u2x = std::sqrt(SQR(w0(m, IVX, k, j, i+1)) + SQR(w0(m, IVY, k, j, i+1))); 
+
+                u0y = std::sqrt(SQR(w0(m, IVX, k, j-1, i)) + SQR(w0(m, IVY, k, j-1, i)));
+                u2y = std::sqrt(SQR(w0(m, IVX, k, j+1, i)) + SQR(w0(m, IVY, k, j+1, i))); 
+              }
 
               // create array of solution values and initialize modal coeffiecent array
               Real ux[3], uy[3], cx[3], cy[3]; 
@@ -282,7 +295,7 @@ void RefinementCondition(MeshBlockPack *pmbp) {
               for (int ii = 0; ii<3; ii++) {cy[ii] = 0.0;}
 
               // 3x3 Legendre coefficent matrix A
-              Real A[3][3] = {
+              const Real A[3][3] = {
                 {3.0/8.0,     1.0/4.0,      3.0/8.0},
                 {-3.0/4.0,    0.0,          3.0/4.0},
                 {3.0/4.0,     -3.0/2.0,     3.0/4.0}
@@ -315,17 +328,33 @@ void RefinementCondition(MeshBlockPack *pmbp) {
             }
 
             if (stencil_ == 5) {
-              Real u2 = w0(m, IDN, k, j, i);
+              Real u2, u0x, u1x, u3x, u4x, u0y, u1y, u3y, u4y;
+              if (variable == 1) {
+                u2 = w0(m, IDN, k, j, i);
 
-              Real u0x = w0(m, IDN, k, j, i - 2);
-              Real u1x = w0(m, IDN, k, j, i - 1);
-              Real u3x = w0(m, IDN, k, j, i + 1);
-              Real u4x = w0(m, IDN, k, j, i + 2);
+                u0x = w0(m, IDN, k, j, i - 2);
+                u1x = w0(m, IDN, k, j, i - 1);
+                u3x = w0(m, IDN, k, j, i + 1);
+                u4x = w0(m, IDN, k, j, i + 2);
 
-              Real u0y = w0(m, IDN, k, j - 2, i);
-              Real u1y = w0(m, IDN, k, j - 1, i);
-              Real u3y = w0(m, IDN, k, j + 1, i);
-              Real u4y = w0(m, IDN, k, j + 2, i);
+                u0y = w0(m, IDN, k, j - 2, i);
+                u1y = w0(m, IDN, k, j - 1, i);
+                u3y = w0(m, IDN, k, j + 1, i);
+                u4y = w0(m, IDN, k, j + 2, i);
+              }
+              if (variable == 2) {
+                u2 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
+
+                u0x = std::sqrt(SQR(w0(m, IVX, k, j, i - 2)) + SQR(w0(m, IVY, k, j, i - 2)));
+                u1x = std::sqrt(SQR(w0(m, IVX, k, j, i - 1)) + SQR(w0(m, IVY, k, j, i - 1)));
+                u3x = std::sqrt(SQR(w0(m, IVX, k, j, i + 1)) + SQR(w0(m, IVY, k, j, i + 1)));
+                u4x = std::sqrt(SQR(w0(m, IVX, k, j, i + 2)) + SQR(w0(m, IVY, k, j, i + 2)));
+
+                u0y = std::sqrt(SQR(w0(m, IVX, k, j - 2, i)) + SQR(w0(m, IVY, k, j - 2,i)));
+                u1y = std::sqrt(SQR(w0(m, IVX, k,j - 1,i)) + SQR(w0(m, IVY,k,j - 1,i)));
+                u3y = std::sqrt(SQR(w0(m, IVX,k,j + 1,i)) + SQR(w0(m, IVY,k,j + 1,i)));
+                u4y = std::sqrt(SQR(w0(m, IVX,k,j + 2,i)) + SQR(w0(m, IVY,k,j + 2,i)));
+              }
 
               Real ux[5], uy[5], cx[5], cy[5]; 
               ux[0] = u0x; ux[1] = u1x; ux[2] = u2; ux[3] = u3x; ux[4] = u4x;
@@ -334,7 +363,7 @@ void RefinementCondition(MeshBlockPack *pmbp) {
               for (int kk = 0; kk<5; kk++) {cx[kk] = 0.0;}
               for (int kk = 0; kk<5; kk++) {cy[kk] = 0.0;}
 
-              Real A[5][5] = {
+              const Real A[5][5] = {
                   {275.0/115.0,     25.0/288.0,     67.0/192.0,     25.0/288.0,     275.0/1152.0},
                   {-55.0/96.0,      -5.0/48.0,      0.0,            5.0/48.0,       55.0/96.0},
                   {1525.0/2016.0,   -475.0/504.0,   125.0/336.0,    -475.0/504.0,   1525.0/2016.0},
