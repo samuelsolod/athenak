@@ -42,12 +42,12 @@ class MeshRefinement {
  public:
   MeshRefinement(Mesh *pm, ParameterInput *pin);
   ~MeshRefinement();
-  Real GetMaxCurveThreshold() const { return max_curve_threshold_; }
-  Real GetMinCurveThreshold() const { return min_curve_threshold_; }
-  int GetStencilOrder() const { return stencil_; }
-  Real GetAlphaRefine() const { return alpha_refine_; }
-  Real GetAlphaCoarsen() const { return alpha_coarsen_; }
-  int GetVariable() const { return variable_; }
+  // Real GetMaxCurveThreshold() const { return max_curve_threshold_; }
+  // Real GetMinCurveThreshold() const { return min_curve_threshold_; }
+  // int GetStencilOrder() const { return stencil_; }
+  // Real GetAlphaRefine() const { return alpha_refine_; }
+  // Real GetAlphaCoarsen() const { return alpha_coarsen_; }
+  // int GetVariable() const { return variable_; }
   // data
   int nmb_created;           // # of MeshBlocks created via AMR across all ranks
   int nmb_deleted;           // # of MeshBlocks deleted via AMR across all ranks
@@ -137,7 +137,8 @@ class MeshRefinement {
   // data
   Mesh *pmy_mesh;
   Real d_threshold_, dd_threshold_, dp_threshold_, dv_threshold_, chi_threshold_, min_curve_threshold_,
-       max_curve_threshold_, stencil_, alpha_refine_, alpha_coarsen_, variable_;
+       max_curve_threshold_, alpha_refine_, alpha_coarsen_;
   bool check_cons_;
+  int stencil_, variable_;
 };
 #endif // MESH_MESH_REFINEMENT_HPP_

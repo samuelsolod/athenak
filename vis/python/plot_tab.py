@@ -195,10 +195,14 @@ def main(**kwargs):
 
     # make single plot
     if (nfiles == 1):
-        # Plot data
         plt.figure()
         plt.plot(x_vals[0], y_vals[0], '.')
-        plt.show()
+        if output_file == 'show':
+            plt.show()
+        else:
+            plt.savefig(output_file)
+        plt.close()
+
 
     # make animation with multiple files
     else:

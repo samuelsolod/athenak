@@ -489,8 +489,9 @@ def main(**kwargs):
                     slice_block_n = block_nz
                     slice_location_min = float(input_data['mesh']['x3min'])
                     slice_location_max = float(input_data['mesh']['x3max'])
-                    slice_root_blocks = (int(input_data['mesh']['nx3'])
-                                         // int(input_data['meshblock']['nx3']))
+                    mesh_nx3 = int(input_data['mesh'].get('nx3', 1))
+                    meshblock_nx3 = int(input_data.get('meshblock', {}).get('nx3', 1))
+                    slice_root_blocks = mesh_nx3 // meshblock_nx3
                 slice_normalized_coord = (kwargs['location'] - slice_location_min) \
                     / (slice_location_max - slice_location_min)
                 first_time = False
@@ -1152,8 +1153,8 @@ def main(**kwargs):
     plt.colorbar(label=label)
     
     # Set limits for axes to remove whitespace
-    plt.xlim(-1.0, 1.0)
-    plt.ylim(-1.0, 1.0)
+    # plt.xlim(-0.2, 0.2)
+    # plt.ylim(-0.6, 0.6)
 
     # plt.title('Density Slice at t = 3.0, reconstruct = wenoz, rsolver = hllc')
 
@@ -1301,7 +1302,7 @@ def main(**kwargs):
 
     # Save or display figure
     if kwargs['output_file'] != 'show':
-        plt.savefig(kwargs['output_file'], dpi=kwargs['dpi'])
+        plt.savefig(kwargs['output_file'], dpi=kwargs['dpi'], bbox_inches='tight')
     else:
         plt.show()
 
