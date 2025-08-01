@@ -12,28 +12,28 @@ basename  = torus
 
 <mesh>
 nghost = 4        # Number of ghost cells
-nx1    = 64       # number of cells in x1-direction
+nx1    = 32       # number of cells in x1-direction
 x1min  = -128.0   # minimum x1
 x1max  = 128.0    # maximum x1
 ix1_bc = user     # inner boundary
 ox1_bc = user     # outer boundary
 
-nx2    = 64       # number of cells in x2-direction
+nx2    = 32       # number of cells in x2-direction
 x2min  = -128.0   # minimum x2
 x2max  = 128.0    # maximum x2
 ix2_bc = user     # inner boundary
 ox2_bc = user     # outer boundary
 
-nx3    = 64       # number of cells in x3-direction
+nx3    = 32       # number of cells in x3-direction
 x3min  = -128.0   # minimum x3
 x3max  = 128.0    # maximum x3
 ix3_bc = user     # inner boundary
 ox3_bc = user     # outer boundary
 
 <meshblock>
-nx1  = 16         # Number of cells in each MeshBlock, X1-dir
-nx2  = 16         # Number of cells in each MeshBlock, X2-dir
-nx3  = 16         # Number of cells in each MeshBlock, X3-dir
+nx1  = 8         # Number of cells in each MeshBlock, X1-dir
+nx2  = 8         # Number of cells in each MeshBlock, X2-dir
+nx3  = 8         # Number of cells in each MeshBlock, X3-dir
 
 <mesh_refinement>
 refinement = static  # type of refinement
