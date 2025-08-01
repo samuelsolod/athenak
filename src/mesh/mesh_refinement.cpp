@@ -150,7 +150,6 @@ MeshRefinement::~MeshRefinement() {
 //----------------------------------------------------------------------------------------
 //! \fn void MeshRefinement::AdaptiveMeshRefinement()
 //! \brief Simple driver function for adaptive mesh refinement
-
 void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin) {
   // first check refinement criteria
   CheckForRefinement(pmy_mesh->pmb_pack);
@@ -183,7 +182,6 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
   }
   return;
 }
-
 //----------------------------------------------------------------------------------------
 //! \fn bool MeshRefinement::CheckForRefinement()
 //! \brief Checks for refinement/de-refinement and sets refine_flag(m) for all
@@ -206,32 +204,33 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
 //!    variable: variable to do power moniter on (integer)
 //!             - 1: density
 //!             - 2: velocity
+//!             - 3: density and momentum
 
 void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   // reallocate and zero refine_flag in host space and sync with device
   Kokkos::realloc(refine_flag, pmy_mesh->nmb_total);
-  for (int m=0; m<(pmy_mesh->nmb_total); ++m) {
+  for (int m = 0; m < (pmy_mesh->nmb_total); ++m) {
     refine_flag.h_view(m) = 0;
   }
   refine_flag.template modify<HostMemSpace>();
   refine_flag.template sync<DevExeSpace>();
 
   // increment cycle counter for each MB
-  for (int m=0; m<(pmy_mesh->nmb_total); ++m) {
+  for (int m = 0; m < (pmy_mesh->nmb_total); ++m) {
     ncyc_since_ref(m) += 1;
   }
-  if ((pmbp->pmesh->ncycle)%(ncyc_check_amr) != 0) {return;}  // not cycle to check
+  if ((pmbp->pmesh->ncycle) % (ncyc_check_amr) != 0) { return; }  // not cycle to check
 
   // capture variables for kernels
-  Mesh *pm = pmbp->pmesh;
-  auto &multi_d = pmy_mesh->multi_d;
-  auto &three_d = pmy_mesh->three_d;
-  auto &indcs = pmy_mesh->mb_indcs;
-  int &is = indcs.is, nx1 = indcs.nx1;
-  int &js = indcs.js, nx2 = indcs.nx2;
-  int &ks = indcs.ks, nx3 = indcs.nx3;
-  const int nkji = nx3*nx2*nx1;
-  const int nji  = nx2*nx1;
+  Mesh* pm = pmbp->pmesh;
+  auto& multi_d = pmy_mesh->multi_d;
+  auto& three_d = pmy_mesh->three_d;
+  auto& indcs = pmy_mesh->mb_indcs;
+  int& is = indcs.is, nx1 = indcs.nx1;
+  int& js = indcs.js, nx2 = indcs.nx2;
+  int& ks = indcs.ks, nx3 = indcs.nx3;
+  const int nkji = nx3 * nx2 * nx1;
+  const int nji = nx2 * nx1;
 
   // check (on device) Hydro/MHD refinement conditions for cons vars over all MeshBlocks
   auto refine_flag_ = refine_flag;
@@ -239,245 +238,454 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   int mbs = pmy_mesh->gids_eachrank[global_variable::my_rank];
 
   // capture input vairables fro refinement criteria
-  auto &dens_thresh  = d_threshold_;
-  auto &ddens_thresh = dd_threshold_;
-  auto &dpres_thresh = dp_threshold_;
-  auto &alpha_refine = alpha_refine_;
-  auto &alpha_coarsen = alpha_coarsen_;
-  int &stencil = stencil_;
-  int &variable = variable_;
+  auto& dens_thresh = d_threshold_;
+  auto& ddens_thresh = dd_threshold_;
+  auto& dpres_thresh = dp_threshold_;
+  auto& alpha_refine = alpha_refine_;
+  auto& alpha_coarsen = alpha_coarsen_;
+  int& stencil = stencil_;
+  int& variable = variable_;
 
   if (((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) && check_cons_) {
-    auto &u0 = (pmbp->phydro != nullptr)? pmbp->phydro->u0 : pmbp->pmhd->u0;
-    auto &w0 = (pmbp->phydro != nullptr)? pmbp->phydro->w0 : pmbp->pmhd->w0;
+    auto& u0 = (pmbp->phydro != nullptr) ? pmbp->phydro->u0 : pmbp->pmhd->u0;
+    auto& w0 = (pmbp->phydro != nullptr) ? pmbp->phydro->w0 : pmbp->pmhd->w0;
 
     // run each MeshBlock in the MeshBlockPack in parallel
-    par_for_outer("ConsRefineCond",DevExeSpace(), 0, 0, 0, (nmb-1),
-    KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
-      // density threshold
-      if (dens_thresh!= 0.0) {
-        Real team_dmax=0.0;
-        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
-        [=](const int idx, Real& dmax) {
-          int k = (idx)/nji;
-          int j = (idx - k*nji)/nx1;
-          int i = (idx - k*nji - j*nx1) + is;
-          j += js;
-          k += ks;
-          dmax = fmax(u0(m,IDN,k,j,i), dmax);
-        },Kokkos::Max<Real>(team_dmax));
+    par_for_outer("ConsRefineCond", DevExeSpace(), 0, 0, 0, (nmb - 1),
+      KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+        // density threshold
+        if (dens_thresh != 0.0) {
+          Real team_dmax = 0.0;
+          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
+            [=](const int idx, Real& dmax) {
+              int k = (idx) / nji;
+              int j = (idx - k * nji) / nx1;
+              int i = (idx - k * nji - j * nx1) + is;
+              j += js;
+              k += ks;
+              dmax = fmax(u0(m, IDN, k, j, i), dmax);
+            }, Kokkos::Max<Real>(team_dmax));
 
-        if (team_dmax > dens_thresh) {refine_flag_.d_view(m+mbs) = 1;}
-        if (team_dmax < dens_thresh) {refine_flag_.d_view(m+mbs) = -1;}
-      }
+          if (team_dmax > dens_thresh) { refine_flag_.d_view(m + mbs) = 1; }
+          if (team_dmax < dens_thresh) { refine_flag_.d_view(m + mbs) = -1; }
+        }
 
-      // density gradient threshold
-      if (ddens_thresh != 0.0) {
-        Real team_ddmax;
-        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
-        [=](const int idx, Real& ddmax) {
-          int k = (idx)/nji;
-          int j = (idx - k*nji)/nx1;
-          int i = (idx - k*nji - j*nx1) + is;
-          j += js;
-          k += ks;
-          Real d2 = SQR(u0(m,IDN,k,j,i+1) - u0(m,IDN,k,j,i-1));
-          if (multi_d) {d2 += SQR(u0(m,IDN,k,j+1,i) - u0(m,IDN,k,j-1,i));}
-          if (three_d) {d2 += SQR(u0(m,IDN,k+1,j,i) - u0(m,IDN,k-1,j,i));}
-          ddmax = fmax((sqrt(d2)/u0(m,IDN,k,j,i)), ddmax);
-        },Kokkos::Max<Real>(team_ddmax));
+        // density gradient threshold
+        if (ddens_thresh != 0.0) {
+          Real team_ddmax;
+          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
+            [=](const int idx, Real& ddmax) {
+              int k = (idx) / nji;
+              int j = (idx - k * nji) / nx1;
+              int i = (idx - k * nji - j * nx1) + is;
+              j += js;
+              k += ks;
+              Real d2 = SQR(u0(m, IDN, k, j, i + 1) - u0(m, IDN, k, j, i - 1));
+              if (multi_d) { d2 += SQR(u0(m, IDN, k, j + 1, i) - u0(m, IDN, k, j - 1, i)); }
+              if (three_d) { d2 += SQR(u0(m, IDN, k + 1, j, i) - u0(m, IDN, k - 1, j, i)); }
+              ddmax = fmax((sqrt(d2) / u0(m, IDN, k, j, i)), ddmax);
+            }, Kokkos::Max<Real>(team_ddmax));
 
-        if (team_ddmax > ddens_thresh) {refine_flag_.d_view(m+mbs) = 1;}
-        if (team_ddmax < 0.25*ddens_thresh) {refine_flag_.d_view(m+mbs) = -1;}
-      }
+          if (team_ddmax > ddens_thresh) { refine_flag_.d_view(m + mbs) = 1; }
+          if (team_ddmax < 0.25 * ddens_thresh) { refine_flag_.d_view(m + mbs) = -1; }
+        }
 
-      // pressure gradient threshold
-      if (dpres_thresh != 0.0) {
-        Real team_dpmax;
-        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
-        [=](const int idx, Real& dpmax) {
-          int k = (idx)/nji;
-          int j = (idx - k*nji)/nx1;
-          int i = (idx - k*nji - j*nx1) + is;
-          j += js;
-          k += ks;
-          Real d2 = SQR(w0(m,IEN,k,j,i+1) - w0(m,IEN,k,j,i-1));
-          if (multi_d) {d2 += SQR(w0(m,IEN,k,j+1,i) - w0(m,IEN,k,j-1,i));}
-          if (three_d) {d2 += SQR(w0(m,IEN,k+1,j,i) - w0(m,IEN,k-1,j,i));}
-          dpmax = fmax((sqrt(d2)/w0(m,IEN,k,j,i)), dpmax);
-        },Kokkos::Max<Real>(team_dpmax));
+        // pressure gradient threshold
+        if (dpres_thresh != 0.0) {
+          Real team_dpmax;
+          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
+            [=](const int idx, Real& dpmax) {
+              int k = (idx) / nji;
+              int j = (idx - k * nji) / nx1;
+              int i = (idx - k * nji - j * nx1) + is;
+              j += js;
+              k += ks;
+              Real d2 = SQR(w0(m, IEN, k, j, i + 1) - w0(m, IEN, k, j, i - 1));
+              if (multi_d) { d2 += SQR(w0(m, IEN, k, j + 1, i) - w0(m, IEN, k, j - 1, i)); }
+              if (three_d) { d2 += SQR(w0(m, IEN, k + 1, j, i) - w0(m, IEN, k - 1, j, i)); }
+              dpmax = fmax((sqrt(d2) / w0(m, IEN, k, j, i)), dpmax);
+            }, Kokkos::Max<Real>(team_dpmax));
 
-        if (team_dpmax > dpres_thresh) {refine_flag_.d_view(m+mbs) = 1;}
-        if (team_dpmax < 0.25*dpres_thresh) {refine_flag_.d_view(m+mbs) = -1;}
-      }
+          if (team_dpmax > dpres_thresh) { refine_flag_.d_view(m + mbs) = 1; }
+          if (team_dpmax < 0.25 * dpres_thresh) { refine_flag_.d_view(m + mbs) = -1; }
+        }
 
-      // custom AMR refinement criteria for power monitor (Deppe 2023)
-      if (alpha_refine != 0.0 && alpha_coarsen != 0.0) {
-        Real cN = 0.0;
-        Real sum_cN = 0.0;
-        // loop over all of the cells in the MeshBlock in parallel
-        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
-          [=](const int idx, Real &max_cN, Real &max_sum_cN) {
-            int k = (idx) / nji;
-            int j = (idx - k * nji) / nx1;
-            int i = (idx - k * nji - j * nx1) + is;
-            j += js;
-            k += ks;
+        // custom AMR criteria for high-order derivitive with defined threshold values 
+        if (alpha_refine != 0.0 && alpha_coarsen != 0.0) {
+          // loop over all of the cells in the MeshBlock in parallel
+          Real team_deriv_max;
+          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
+            [=](const int idx, Real& deriv_max) {
+              int k = (idx) / nji;
+              int j = (idx - k * nji) / nx1;
+              int i = (idx - k * nji - j * nx1) + is;
+              j += js;
+              k += ks;
+              if (multi_d) {
+                if (stencil == 3) {
+                  if (variable == 3) {
+                    // second derivitive of density
+                    Real rho1 = w0(m, IDN, k, j, i);
+                    Real rho0x = w0(m, IDN, k, j, i - 1);
+                    Real rho2x = w0(m, IDN, k, j, i + 1);
+                    Real rho0y = w0(m, IDN, k, j - 1, i);
+                    Real rho2y = w0(m, IDN, k, j + 1, i);
 
-            if (stencil == 3) {
-              // solution values for cells of interest for 3-point stencil
-              Real u1, u0x, u2x, u0y, u2y;
-              if (variable == 1) {
-                u1 = w0(m, IDN, k, j, i);
+                    Real ddrho_x = rho2x - 2.0 * rho1 + rho0x;
+                    Real ddrho_y = rho2y - 2.0 * rho1 + rho0y;
+                    
+                    Real rho_error = fmax(fabs(ddrho_x), fabs(ddrho_y)) / (rho1 + 1e-15);
 
-                u0x = w0(m, IDN, k, j, i - 1);
-                u2x = w0(m, IDN, k, j, i + 1); 
+                    // second derivitive of momentum magnitude
+                    auto mom_mag = [&](int kk, int jj, int ii) -> Real {
+                      Real mx = w0(m, IM1, kk, jj, ii);
+                      Real my = w0(m, IM2, kk, jj, ii);
+                      return std::sqrt(mx*mx + my*my);
+                    };
 
-                u0y = w0(m, IDN, k, j - 1, i);
-                u2y = w0(m, IDN, k, j + 1, i); 
+                    Real mom1  = mom_mag(k, j, i);
+                    Real mom0x = mom_mag(k, j, i - 1);
+                    Real mom2x = mom_mag(k, j, i + 1); 
+                    Real mom0y = mom_mag(k, j - 1, i);
+                    Real mom2y = mom_mag(k, j + 1, i);
+
+                    Real ddmom_x = mom2x - 2.0 * mom1 + mom0x;
+                    Real ddmom_y = mom2y - 2.0 * mom1 + mom0y;
+
+                    Real mom_error = fmax(fabs(ddmom_x), fabs(ddmom_y)) / (mom1 + 1e-15);
+
+                    // maximum of density and momentum errors
+                    Real local_error = fmax(rho_error, mom_error);
+                    deriv_max = fmax(local_error, deriv_max);
+                  }
               }
-              if (variable == 2) {
-                u1 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
+                if (stencil == 5) {
+                  if (variable == 3) {
+                    // fourth derivitive of density
+                    Real rho2 = w0(m, IDN, k, j, i);
+                    Real rho0x = w0(m, IDN, k, j, i - 2);
+                    Real rho1x = w0(m, IDN, k, j, i - 1);
+                    Real rho3x = w0(m, IDN, k, j, i + 1);
+                    Real rho4x = w0(m, IDN, k, j, i + 2);
+                    Real rho0y = w0(m, IDN, k, j - 2, i);
+                    Real rho1y = w0(m, IDN, k, j - 1, i);
+                    Real rho3y = w0(m, IDN, k, j + 1, i);
+                    Real rho4y = w0(m, IDN, k, j + 2, i);
 
-                u0x = std::sqrt(SQR(w0(m, IVX, k, j, i-1)) + SQR(w0(m, IVY, k, j, i-1)));
-                u2x = std::sqrt(SQR(w0(m, IVX, k, j, i+1)) + SQR(w0(m, IVY, k, j, i+1))); 
+                    Real ddddrho_x = rho4x - 4.0 * rho3x + 6.0 * rho2 - 4.0 * rho1x + rho0x;
+                    Real ddddrho_y = rho4y - 4.0 * rho3y + 6.0 * rho2 - 4.0 * rho1y + rho0y;
 
-                u0y = std::sqrt(SQR(w0(m, IVX, k, j-1, i)) + SQR(w0(m, IVY, k, j-1, i)));
-                u2y = std::sqrt(SQR(w0(m, IVX, k, j+1, i)) + SQR(w0(m, IVY, k, j+1, i))); 
+                    Real rho_error = fmax(fabs(ddddrho_x), fabs(ddddrho_y)) / (rho2 + 1e-15);
+
+                    // fourth derivitive of momentum magnitude
+                    auto mom_mag = [&](int kk, int jj, int ii) -> Real {
+                      Real mx = w0(m, IM1, kk, jj, ii);
+                      Real my = w0(m, IM2, kk, jj, ii);
+                      return std::sqrt(mx*mx + my*my);
+                    };
+
+                    Real mom2  = mom_mag(k, j, i);
+                    Real mom0x = mom_mag(k, j, i - 2);
+                    Real mom1x = mom_mag(k, j, i - 1);
+                    Real mom3x = mom_mag(k, j, i + 1);
+                    Real mom4x = mom_mag(k, j, i + 2);
+                    Real mom0y = mom_mag(k, j - 2, i);
+                    Real mom1y = mom_mag(k, j - 1, i);
+                    Real mom3y = mom_mag(k, j + 1, i);
+                    Real mom4y = mom_mag(k, j + 2, i);
+
+                    Real ddddmom_x = mom4x - 4.0 * mom3x + 6.0 * mom2 - 4.0 * mom1x + mom0x;
+                    Real ddddmom_y = mom4y - 4.0 * mom3y + 6.0 * mom2 - 4.0 * mom1y + mom0y;
+
+                    Real mom_error = fmax(fabs(ddddmom_x), fabs(ddddmom_y)) / (mom2 + 1e-15);
+
+                    // maximum of density and momentum errors
+                    Real local_error = fmax(rho_error, mom_error);
+                    deriv_max = fmax(local_error, deriv_max);
+                  }
+                }
+              }              
+              if (three_d) {
+                if (stencil == 3) {
+                  if (variable == 3) {
+                    // second derivitive of density
+                    Real rho1 = w0(m, IDN, k, j, i);
+                    Real rho0x = w0(m, IDN, k, j, i - 1);
+                    Real rho2x = w0(m, IDN, k, j, i + 1);
+                    Real rho0y = w0(m, IDN, k, j - 1, i);
+                    Real rho2y = w0(m, IDN, k, j + 1, i);
+                    Real rho2z = w0(m, IDN, k + 1, j, i);
+                    Real rho0z = w0(m, IDN, k - 1, j, i);
+
+                    Real ddrho_x = rho2x - 2.0 * rho1 + rho0x;
+                    Real ddrho_y = rho2y - 2.0 * rho1 + rho0y;
+                    Real ddrho_z = rho2z - 2.0 * rho1 + rho0z;
+                    
+                    Real rho_error = fmax(fabs(ddrho_x), fmax(fabs(ddrho_y), fabs(ddrho_z))) / (rho1 + 1e-15);
+
+                    // second derivitive of momentum magnitude
+                    auto mom_mag = [&](int kk, int jj, int ii) -> Real {
+                      Real mx = w0(m, IM1, kk, jj, ii);
+                      Real my = w0(m, IM2, kk, jj, ii);
+                      Real mz = w0(m, IM3, kk, jj, ii);
+                      return std::sqrt(mx*mx + my*my + mz*mz);
+                    };
+
+                    Real mom1  = mom_mag(k, j, i);
+                    Real mom0x = mom_mag(k, j, i - 1);
+                    Real mom2x = mom_mag(k, j, i + 1); 
+                    Real mom0y = mom_mag(k, j - 1, i);
+                    Real mom2y = mom_mag(k, j + 1, i);
+                    Real mom0z = mom_mag(k - 1, j, i);
+                    Real mom2z = mom_mag(k + 1, j, i);
+
+                    Real ddmom_x = mom2x - 2.0 * mom1 + mom0x;
+                    Real ddmom_y = mom2y - 2.0 * mom1 + mom0y;
+                    Real ddmom_z = mom2z - 2.0 * mom1 + mom0z;
+
+                    Real mom_error = fmax(fabs(ddmom_x), fmax(fabs(ddmom_y), fabs(ddmom_z))) / (mom1 + 1e-15);
+
+                    // maximum of density and momentum errors
+                    Real local_error = fmax(rho_error, mom_error);
+                    deriv_max = fmax(local_error, deriv_max);
+                  }
               }
-              // create array of solution values and initialize modal coeffiecent array
-              Real ux[3], uy[3], cx[3], cy[3]; 
-              ux[0] = u0x; ux[1] = u1; ux[2] = u2x;
-              uy[0] = u0y; uy[1] = u1; uy[2] = u2y;
+                if (stencil == 5) {
+                  if (variable == 3) {
+                    // fourth derivitive of density
+                    Real rho2 = w0(m, IDN, k, j, i);
+                    Real rho0x = w0(m, IDN, k, j, i - 2);
+                    Real rho1x = w0(m, IDN, k, j, i - 1);
+                    Real rho3x = w0(m, IDN, k, j, i + 1);
+                    Real rho4x = w0(m, IDN, k, j, i + 2);
+                    Real rho0y = w0(m, IDN, k, j - 2, i);
+                    Real rho1y = w0(m, IDN, k, j - 1, i);
+                    Real rho3y = w0(m, IDN, k, j + 1, i);
+                    Real rho4y = w0(m, IDN, k, j + 2, i);
+                    Real rho0z = w0(m, IDN, k-2, j, i);
+                    Real rho1z = w0(m, IDN, k-1, j, i);
+                    Real rho3z = w0(m, IDN, k+1, j, i);
+                    Real rho4z = w0(m, IDN, k+2, j, i);
 
-              for (int ii = 0; ii<3; ii++) {cx[ii] = 0.0;}
-              for (int ii = 0; ii<3; ii++) {cy[ii] = 0.0;}
+                    Real ddddrho_x = rho4x - 4.0 * rho3x + 6.0 * rho2 - 4.0 * rho1x + rho0x;
+                    Real ddddrho_y = rho4y - 4.0 * rho3y + 6.0 * rho2 - 4.0 * rho1y + rho0y;
+                    Real ddddrho_z = rho4z - 4.0 * rho3z + 6.0 * rho2 - 4.0 * rho1z + rho0z;
+
+                    Real rho_error = fmax(fabs(ddddrho_x), fmax(fabs(ddddrho_y), fabs(ddddrho_z))) / (rho2 + 1e-15);
+
+                    // fourth derivitive of momentum magnitude
+                    auto mom_mag = [&](int kk, int jj, int ii) -> Real {
+                      Real mx = w0(m, IM1, kk, jj, ii);
+                      Real my = w0(m, IM2, kk, jj, ii);
+                      Real mz = w0(m, IM3, kk, jj, ii);
+                      return std::sqrt(mx*mx + my*my + mz*mz);
+                    };
+
+                    Real mom2  = mom_mag(k, j, i);
+                    Real mom0x = mom_mag(k, j, i - 2);
+                    Real mom1x = mom_mag(k, j, i - 1);
+                    Real mom3x = mom_mag(k, j, i + 1);
+                    Real mom4x = mom_mag(k, j, i + 2);
+                    Real mom0y = mom_mag(k, j - 2, i);
+                    Real mom1y = mom_mag(k, j - 1, i);
+                    Real mom3y = mom_mag(k, j + 1, i);
+                    Real mom4y = mom_mag(k, j + 2, i);
+                    Real mom0z = mom_mag(k - 2, j, i);
+                    Real mom1z = mom_mag(k - 1, j, i);
+                    Real mom3z = mom_mag(k + 1, j, i);
+                    Real mom4z = mom_mag(k + 2, j, i);
+
+                    Real ddddmom_x = mom4x - 4.0 * mom3x + 6.0 * mom2 - 4.0 * mom1x + mom0x;
+                    Real ddddmom_y = mom4y - 4.0 * mom3y + 6.0 * mom2 - 4.0 * mom1y + mom0y;
+                    Real ddddmom_z = mom4z - 4.0 * mom3z + 6.0 * mom2 - 4.0 * mom1z + mom0z;
+
+                    Real mom_error = fmax(fabs(ddddmom_x), fmax(fabs(ddddmom_y), fabs(ddddmom_z))) / (mom2 + 1e-15);
+
+                    // maximum of density and momentum errors
+                    Real local_error = fmax(rho_error, mom_error);
+                    deriv_max = fmax(local_error, deriv_max);
+                  }
+                }
+              }
+            }, Kokkos::Max<Real>(team_deriv_max));
+
+          if (team_deriv_max > alpha_refine) { refine_flag_.d_view(m + mbs) = 1; }
+          if (team_deriv_max < alpha_coarsen) { refine_flag_.d_view(m + mbs) = -1; }
+        }
+      } 
+    ); 
+  } 
+ 
+
+//       // custom AMR refinement criteria for power monitor (Deppe 2023)
+//       if (alpha_refine != 0.0 && alpha_coarsen != 0.0) {
+//         Real cN = 0.0;
+//         Real sum_cN = 0.0;
+//         // loop over all of the cells in the MeshBlock in parallel
+//         Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
+//           [=](const int idx, Real &max_cN, Real &max_sum_cN) {
+//             int k = (idx) / nji;
+//             int j = (idx - k * nji) / nx1;
+//             int i = (idx - k * nji - j * nx1) + is;
+//             j += js;
+//             k += ks;
+
+//             if (stencil == 3) {
+//               // solution values for cells of interest for 3-point stencil
+//               Real u1, u0x, u2x, u0y, u2y;
+//               if (variable == 1) {
+//                 u1 = w0(m, IDN, k, j, i);
+
+//                 u0x = w0(m, IDN, k, j, i - 1);
+//                 u2x = w0(m, IDN, k, j, i + 1); 
+
+//                 u0y = w0(m, IDN, k, j - 1, i);
+//                 u2y = w0(m, IDN, k, j + 1, i); 
+//               }
+//               if (variable == 2) {
+//                 u1 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
+
+//                 u0x = std::sqrt(SQR(w0(m, IVX, k, j, i-1)) + SQR(w0(m, IVY, k, j, i-1)));
+//                 u2x = std::sqrt(SQR(w0(m, IVX, k, j, i+1)) + SQR(w0(m, IVY, k, j, i+1))); 
+
+//                 u0y = std::sqrt(SQR(w0(m, IVX, k, j-1, i)) + SQR(w0(m, IVY, k, j-1, i)));
+//                 u2y = std::sqrt(SQR(w0(m, IVX, k, j+1, i)) + SQR(w0(m, IVY, k, j+1, i))); 
+//               }
+//               // create array of solution values and initialize modal coeffiecent array
+//               Real ux[3], uy[3], cx[3], cy[3]; 
+//               ux[0] = u0x; ux[1] = u1; ux[2] = u2x;
+//               uy[0] = u0y; uy[1] = u1; uy[2] = u2y;
+
+//               for (int ii = 0; ii<3; ii++) {cx[ii] = 0.0;}
+//               for (int ii = 0; ii<3; ii++) {cy[ii] = 0.0;}
   
-              // 3x3 Legendre coefficent matrix A
-              const Real A[3][3] = {
-                {3.0/8.0,     1.0/4.0,      3.0/8.0},
-                {-3.0/4.0,    0.0,          3.0/4.0},
-                {3.0/4.0,     -3.0/2.0,     3.0/4.0}
-              };
-              // A * u = c
-              for (int row = 0; row < 3; ++row) {
-                for (int col = 0; col < 3; ++col) {
-                  cx[row] += A[row][col] * ux[col];
-                  cy[row] += A[row][col] * uy[col];
-                }
-              }
-              // compute (c_N)^2 and sum_0^N((c_n)^2)... see equation (9) in Deppe 2023
-              Real kappa3x = 0.0;
-              Real kappa3y = 0.0;
-              for (int jj = 0; jj < 3; ++jj) {
-                kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
-                kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
-              }
-              Real kappa3x_hat = cx[2] * cx[2] / 5.0;
-              Real kappa3y_hat = cy[2] * cy[2] / 5.0;
-              Real kappa3 = fmax(kappa3x, kappa3y);
-              Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
-              // extract kappa3_hat and kappa3 from parallel reduction
-              max_cN = fmax(kappa3_hat, max_cN);
-              max_sum_cN = fmax(kappa3, max_sum_cN);
-            }
-            if (stencil == 5) {
-              Real u2, u0x, u1x, u3x, u4x, u0y, u1y, u3y, u4y;
-              if (variable == 1) {
-                u2 = w0(m, IDN, k, j, i);
+//               // 3x3 Legendre coefficent matrix A
+//               const Real A[3][3] = {
+//                 {3.0/8.0,     1.0/4.0,      3.0/8.0},
+//                 {-3.0/4.0,    0.0,          3.0/4.0},
+//                 {3.0/4.0,     -3.0/2.0,     3.0/4.0}
+//               };
+//               // A * u = c
+//               for (int row = 0; row < 3; ++row) {
+//                 for (int col = 0; col < 3; ++col) {
+//                   cx[row] += A[row][col] * ux[col];
+//                   cy[row] += A[row][col] * uy[col];
+//                 }
+//               }
+//               // compute (c_N)^2 and sum_0^N((c_n)^2)... see equation (9) in Deppe 2023
+//               Real kappa3x = 0.0;
+//               Real kappa3y = 0.0;
+//               for (int jj = 0; jj < 3; ++jj) {
+//                 kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
+//                 kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
+//               }
+//               Real kappa3x_hat = cx[2] * cx[2] / 5.0;
+//               Real kappa3y_hat = cy[2] * cy[2] / 5.0;
+//               Real kappa3 = fmax(kappa3x, kappa3y);
+//               Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
+//               // extract kappa3_hat and kappa3 from parallel reduction
+//               max_cN = fmax(kappa3_hat, max_cN);
+//               max_sum_cN = fmax(kappa3, max_sum_cN);
+//             }
+//             if (stencil == 5) {
+//               Real u2, u0x, u1x, u3x, u4x, u0y, u1y, u3y, u4y;
+//               if (variable == 1) {
+//                 u2 = w0(m, IDN, k, j, i);
 
-                u0x = w0(m, IDN, k, j, i - 2);
-                u1x = w0(m, IDN, k, j, i - 1);
-                u3x = w0(m, IDN, k, j, i + 1);
-                u4x = w0(m, IDN, k, j, i + 2);
+//                 u0x = w0(m, IDN, k, j, i - 2);
+//                 u1x = w0(m, IDN, k, j, i - 1);
+//                 u3x = w0(m, IDN, k, j, i + 1);
+//                 u4x = w0(m, IDN, k, j, i + 2);
 
-                u0y = w0(m, IDN, k, j - 2, i);
-                u1y = w0(m, IDN, k, j - 1, i);
-                u3y = w0(m, IDN, k, j + 1, i);
-                u4y = w0(m, IDN, k, j + 2, i);
-              }
-              if (variable == 2) {
-                u2 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
+//                 u0y = w0(m, IDN, k, j - 2, i);
+//                 u1y = w0(m, IDN, k, j - 1, i);
+//                 u3y = w0(m, IDN, k, j + 1, i);
+//                 u4y = w0(m, IDN, k, j + 2, i);
+//               }
+//               if (variable == 2) {
+//                 u2 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
 
-                u0x = std::sqrt(SQR(w0(m, IVX, k, j, i - 2)) + SQR(w0(m, IVY, k, j, i - 2)));
-                u1x = std::sqrt(SQR(w0(m, IVX, k, j, i - 1)) + SQR(w0(m, IVY, k, j, i - 1)));
-                u3x = std::sqrt(SQR(w0(m, IVX, k, j, i + 1)) + SQR(w0(m, IVY, k, j, i + 1)));
-                u4x = std::sqrt(SQR(w0(m, IVX, k, j, i + 2)) + SQR(w0(m, IVY, k, j, i + 2)));
+//                 u0x = std::sqrt(SQR(w0(m, IVX, k, j, i - 2)) + SQR(w0(m, IVY, k, j, i - 2)));
+//                 u1x = std::sqrt(SQR(w0(m, IVX, k, j, i - 1)) + SQR(w0(m, IVY, k, j, i - 1)));
+//                 u3x = std::sqrt(SQR(w0(m, IVX, k, j, i + 1)) + SQR(w0(m, IVY, k, j, i + 1)));
+//                 u4x = std::sqrt(SQR(w0(m, IVX, k, j, i + 2)) + SQR(w0(m, IVY, k, j, i + 2)));
 
-                u0y = std::sqrt(SQR(w0(m, IVX, k, j - 2, i)) + SQR(w0(m, IVY, k, j - 2,i)));
-                u1y = std::sqrt(SQR(w0(m, IVX, k,j - 1,i)) + SQR(w0(m, IVY,k,j - 1,i)));
-                u3y = std::sqrt(SQR(w0(m, IVX,k,j + 1,i)) + SQR(w0(m, IVY,k,j + 1,i)));
-                u4y = std::sqrt(SQR(w0(m, IVX,k,j + 2,i)) + SQR(w0(m, IVY,k,j + 2,i)));
-              }
+//                 u0y = std::sqrt(SQR(w0(m, IVX, k, j - 2, i)) + SQR(w0(m, IVY, k, j - 2,i)));
+//                 u1y = std::sqrt(SQR(w0(m, IVX, k,j - 1,i)) + SQR(w0(m, IVY,k,j - 1,i)));
+//                 u3y = std::sqrt(SQR(w0(m, IVX,k,j + 1,i)) + SQR(w0(m, IVY,k,j + 1,i)));
+//                 u4y = std::sqrt(SQR(w0(m, IVX,k,j + 2,i)) + SQR(w0(m, IVY,k,j + 2,i)));
+//               }
 
-              Real ux[5], uy[5], cx[5], cy[5]; 
-              ux[0] = u0x; ux[1] = u1x; ux[2] = u2; ux[3] = u3x; ux[4] = u4x;
-              uy[0] = u0y; uy[1] = u1y; uy[2] = u2; uy[3] = u3y; uy[4] = u4y;
+//               Real ux[5], uy[5], cx[5], cy[5]; 
+//               ux[0] = u0x; ux[1] = u1x; ux[2] = u2; ux[3] = u3x; ux[4] = u4x;
+//               uy[0] = u0y; uy[1] = u1y; uy[2] = u2; uy[3] = u3y; uy[4] = u4y;
 
-              for (int kk = 0; kk<5; kk++) {cx[kk] = 0.0;}
-              for (int kk = 0; kk<5; kk++) {cy[kk] = 0.0;}
+//               for (int kk = 0; kk<5; kk++) {cx[kk] = 0.0;}
+//               for (int kk = 0; kk<5; kk++) {cy[kk] = 0.0;}
 
-              const Real A[5][5] = {
-                  {275.0/115.0,     25.0/288.0,     67.0/192.0,     25.0/288.0,     275.0/1152.0},
-                  {-55.0/96.0,      -5.0/48.0,      0.0,            5.0/48.0,       55.0/96.0},
-                  {1525.0/2016.0,   -475.0/504.0,   125.0/336.0,    -475.0/504.0,   1525.0/2016.0},
-                  {-25.0/48.0,      25.0/24.0,      0.0,           -25.0/24.0,      25.0/48.0},
-                  {125.0/336.0,     -125.0/84.0,    125.0/56.0,     -125.0/84.0,    125.0/336.0}
-              };
+//               const Real A[5][5] = {
+//                   {275.0/115.0,     25.0/288.0,     67.0/192.0,     25.0/288.0,     275.0/1152.0},
+//                   {-55.0/96.0,      -5.0/48.0,      0.0,            5.0/48.0,       55.0/96.0},
+//                   {1525.0/2016.0,   -475.0/504.0,   125.0/336.0,    -475.0/504.0,   1525.0/2016.0},
+//                   {-25.0/48.0,      25.0/24.0,      0.0,           -25.0/24.0,      25.0/48.0},
+//                   {125.0/336.0,     -125.0/84.0,    125.0/56.0,     -125.0/84.0,    125.0/336.0}
+//               };
 
-              for (int row = 0; row < 5; ++row) {
-                for (int col = 0; col < 5; ++col) {
-                  cx[row] += A[row][col] * ux[col];
-                  cy[row] += A[row][col] * uy[col];
-                }
-              }
+//               for (int row = 0; row < 5; ++row) {
+//                 for (int col = 0; col < 5; ++col) {
+//                   cx[row] += A[row][col] * ux[col];
+//                   cy[row] += A[row][col] * uy[col];
+//                 }
+//               }
 
-              Real kappa3x = 0.0;
-              Real kappa3y = 0.0;
-              for (int jj = 0; jj < 5; ++jj) {
-                kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
-                kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
-              }
-              Real kappa3x_hat = cx[4] * cx[4] / 9.0;
-              Real kappa3y_hat = cy[4] * cy[4] / 9.0;
+//               Real kappa3x = 0.0;
+//               Real kappa3y = 0.0;
+//               for (int jj = 0; jj < 5; ++jj) {
+//                 kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
+//                 kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
+//               }
+//               Real kappa3x_hat = cx[4] * cx[4] / 9.0;
+//               Real kappa3y_hat = cy[4] * cy[4] / 9.0;
 
-              Real kappa3 = fmax(kappa3x, kappa3y);
-              Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
+//               Real kappa3 = fmax(kappa3x, kappa3y);
+//               Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
 
-              max_cN = fmax(kappa3_hat, max_cN);
-              max_sum_cN = fmax(kappa3, max_sum_cN);
-            }
-          // Kokkos::Max finds the maximum values over the entire meshblock
-          }, Kokkos::Max<Real>(cN), Kokkos::Max<Real>(sum_cN));
+//               max_cN = fmax(kappa3_hat, max_cN);
+//               max_sum_cN = fmax(kappa3, max_sum_cN);
+//             }
+//           // Kokkos::Max finds the maximum values over the entire meshblock
+//           }, Kokkos::Max<Real>(cN), Kokkos::Max<Real>(sum_cN));
         
-          // check if the Nth degree power exceeds the sum of powers
-        if (stencil == 3) {
-          Real N = 2.0;
-          Real threshold_refine = pow(N, 2.0 * alpha_refine);
-          Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen);
+//           // check if the Nth degree power exceeds the sum of powers
+//         if (stencil == 3) {
+//           Real N = 2.0;
+//           Real threshold_refine = pow(N, 2.0 * alpha_refine);
+//           Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen);
 
-          if (cN * threshold_refine > sum_cN) {
-            refine_flag_.d_view(m + mbs) = 1;
-          }
-          if (cN * threshold_coarsen < sum_cN) {
-            refine_flag_.d_view(m + mbs) = -1;
-          }
-        }
-        if (stencil == 5) {
-          Real N = 4.0;
-          Real threshold_refine = pow(N, 2.0 * alpha_refine);
-          Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen);
+//           if (cN * threshold_refine > sum_cN) {
+//             refine_flag_.d_view(m + mbs) = 1;
+//           }
+//           if (cN * threshold_coarsen < sum_cN) {
+//             refine_flag_.d_view(m + mbs) = -1;
+//           }
+//         }
+//         if (stencil == 5) {
+//           Real N = 4.0;
+//           Real threshold_refine = pow(N, 2.0 * alpha_refine);
+//           Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen);
 
-          if (cN * threshold_refine > sum_cN) {
-            refine_flag_.d_view(m + mbs) = 1;
-          }
-          if (cN * threshold_coarsen < sum_cN) {
-            refine_flag_.d_view(m + mbs) = -1;
-          }
-        }
-      }
-    });
-  }
+//           if (cN * threshold_refine > sum_cN) {
+//             refine_flag_.d_view(m + mbs) = 1;
+//           }
+//           if (cN * threshold_coarsen < sum_cN) {
+//             refine_flag_.d_view(m + mbs) = -1;
+//           }
+//         }
+//       }
+//     });
+//   }
+// ---------------------------------------------------------------------------
+
 
   // Check (on device) user-defined refinement condition(s), if any
   if (pmy_mesh->pgen->user_ref_func != nullptr) {

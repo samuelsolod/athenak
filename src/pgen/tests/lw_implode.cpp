@@ -22,7 +22,7 @@
 //! \fn void MeshBlock::LWImplode_()
 //  \brief Problem Generator for LW Implosion test
 
-void ProblemGenerator::LWImplode(ParameterInput *pin, const bool restart) {
+void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (restart) return;
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
