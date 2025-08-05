@@ -58,6 +58,8 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   stencil_(0),
   alpha_refine_(0.0),
   alpha_coarsen_(0.0),
+  refine_threshold_(0.0),
+  coarsen_threshold_(0.0),
   variable_(0),
   check_cons_(false) {
   if (pin->DoesBlockExist("mesh_refinement")) {
@@ -108,6 +110,12 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
     if (pin->DoesParameterExist("mesh_refinement", "variable")) {
       variable_ = pin->GetInteger("mesh_refinement", "variable");
       check_cons_ = true;
+    }
+    if (pin->DoesParameterExist("mesh_refinement", "refine_threshold")) {
+      refine_threshold_ = pin->GetReal("mesh_refinement", "refine_threshold");
+    }
+    if (pin->DoesParameterExist("mesh_refinement", "coarsen_threshold")) {
+      coarsen_threshold_ = pin->GetReal("mesh_refinement", "coarsen_threshold");
     }
   }
 
@@ -198,13 +206,15 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
 //! User defined refinement condtions: 
 //!    max_curve_threshold: maximum normalized curvature 
 //!    min_curve_threshold: minimum normalized curvature 
-//!    alpha_refine_: alpha_N threshold for refinement
-//!    alpha_coarsen: alpha_N threshold for coarsening
+//!    alpha_refine_: alpha_N threshold for refinement with power moniter
+//!    alpha_coarsen: alpha_N threshold for coarsening with power moniter
 //!    stencil: order of the stencil used for power monitor (integer)
 //!    variable: variable to do power moniter on (integer)
 //!             - 1: density
 //!             - 2: velocity
 //!             - 3: density and momentum
+//!    refine_threshold: threshold for refinement based on high order derivitves
+//!    coarsen_threshold: threshold for coarsening based on high order derivitves
 
 void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   // reallocate and zero refine_flag in host space and sync with device
@@ -245,6 +255,8 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   auto& alpha_coarsen = alpha_coarsen_;
   int& stencil = stencil_;
   int& variable = variable_;
+  auto& refine_threshold = refine_threshold_;
+  auto& coarsen_threshold = coarsen_threshold_;
 
   if (((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) && check_cons_) {
     auto& u0 = (pmbp->phydro != nullptr) ? pmbp->phydro->u0 : pmbp->pmhd->u0;
@@ -310,8 +322,174 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
           if (team_dpmax < 0.25 * dpres_thresh) { refine_flag_.d_view(m + mbs) = -1; }
         }
 
-        // custom AMR criteria for high-order derivitive with defined threshold values 
+        // custom AMR refinement criteria for power monitor (Deppe 2023)
         if (alpha_refine != 0.0 && alpha_coarsen != 0.0) {
+          Real cN = 0.0;
+          Real sum_cN = 0.0;
+          // loop over all of the cells in the MeshBlock in parallel
+          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
+            [=](const int idx, Real &max_cN, Real &max_sum_cN) {
+              int k = (idx) / nji;
+              int j = (idx - k * nji) / nx1;
+              int i = (idx - k * nji - j * nx1) + is;
+              j += js;
+              k += ks;
+
+              if (stencil == 3) {
+                // solution values for cells of interest for 3-point stencil
+                Real u1, u0x, u2x, u0y, u2y;
+                if (variable == 1) {
+                  u1 = w0(m, IDN, k, j, i);
+
+                  u0x = w0(m, IDN, k, j, i - 1);
+                  u2x = w0(m, IDN, k, j, i + 1); 
+
+                  u0y = w0(m, IDN, k, j - 1, i);
+                  u2y = w0(m, IDN, k, j + 1, i); 
+                }
+                if (variable == 2) {
+                  u1 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
+
+                  u0x = std::sqrt(SQR(w0(m, IVX, k, j, i-1)) + SQR(w0(m, IVY, k, j, i-1)));
+                  u2x = std::sqrt(SQR(w0(m, IVX, k, j, i+1)) + SQR(w0(m, IVY, k, j, i+1))); 
+
+                  u0y = std::sqrt(SQR(w0(m, IVX, k, j-1, i)) + SQR(w0(m, IVY, k, j-1, i)));
+                  u2y = std::sqrt(SQR(w0(m, IVX, k, j+1, i)) + SQR(w0(m, IVY, k, j+1, i))); 
+                }
+                // create array of solution values and initialize modal coeffiecent array
+                Real ux[3], uy[3], cx[3], cy[3]; 
+                ux[0] = u0x; ux[1] = u1; ux[2] = u2x;
+                uy[0] = u0y; uy[1] = u1; uy[2] = u2y;
+
+                for (int ii = 0; ii<3; ii++) {cx[ii] = 0.0;}
+                for (int ii = 0; ii<3; ii++) {cy[ii] = 0.0;}
+    
+                // 3x3 Legendre coefficent matrix A
+                const Real A[3][3] = {
+                  {3.0/8.0,     1.0/4.0,      3.0/8.0},
+                  {-3.0/4.0,    0.0,          3.0/4.0},
+                  {3.0/4.0,     -3.0/2.0,     3.0/4.0}
+                };
+                // A * u = c
+                for (int row = 0; row < 3; ++row) {
+                  for (int col = 0; col < 3; ++col) {
+                    cx[row] += A[row][col] * ux[col];
+                    cy[row] += A[row][col] * uy[col];
+                  }
+                }
+                // compute (c_N)^2 and sum_0^N((c_n)^2)... see equation (9) in Deppe 2023
+                Real kappa3x = 0.0;
+                Real kappa3y = 0.0;
+                for (int jj = 0; jj < 3; ++jj) {
+                  kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
+                  kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
+                }
+                Real kappa3x_hat = cx[2] * cx[2] / 5.0;
+                Real kappa3y_hat = cy[2] * cy[2] / 5.0;
+                Real kappa3 = fmax(kappa3x, kappa3y);
+                Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
+                // extract kappa3_hat and kappa3 from parallel reduction
+                max_cN = fmax(kappa3_hat, max_cN);
+                max_sum_cN = fmax(kappa3, max_sum_cN);
+              }
+              if (stencil == 5) {
+                Real u2, u0x, u1x, u3x, u4x, u0y, u1y, u3y, u4y;
+                if (variable == 1) {
+                  u2 = w0(m, IDN, k, j, i);
+
+                  u0x = w0(m, IDN, k, j, i - 2);
+                  u1x = w0(m, IDN, k, j, i - 1);
+                  u3x = w0(m, IDN, k, j, i + 1);
+                  u4x = w0(m, IDN, k, j, i + 2);
+
+                  u0y = w0(m, IDN, k, j - 2, i);
+                  u1y = w0(m, IDN, k, j - 1, i);
+                  u3y = w0(m, IDN, k, j + 1, i);
+                  u4y = w0(m, IDN, k, j + 2, i);
+                }
+                if (variable == 2) {
+                  u2 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
+
+                  u0x = std::sqrt(SQR(w0(m, IVX, k, j, i - 2)) + SQR(w0(m, IVY, k, j, i - 2)));
+                  u1x = std::sqrt(SQR(w0(m, IVX, k, j, i - 1)) + SQR(w0(m, IVY, k, j, i - 1)));
+                  u3x = std::sqrt(SQR(w0(m, IVX, k, j, i + 1)) + SQR(w0(m, IVY, k, j, i + 1)));
+                  u4x = std::sqrt(SQR(w0(m, IVX, k, j, i + 2)) + SQR(w0(m, IVY, k, j, i + 2)));
+
+                  u0y = std::sqrt(SQR(w0(m, IVX, k, j - 2, i)) + SQR(w0(m, IVY, k, j - 2,i)));
+                  u1y = std::sqrt(SQR(w0(m, IVX, k,j - 1,i)) + SQR(w0(m, IVY,k,j - 1,i)));
+                  u3y = std::sqrt(SQR(w0(m, IVX,k,j + 1,i)) + SQR(w0(m, IVY,k,j + 1,i)));
+                  u4y = std::sqrt(SQR(w0(m, IVX,k,j + 2,i)) + SQR(w0(m, IVY,k,j + 2,i)));
+                }
+
+                Real ux[5], uy[5], cx[5], cy[5]; 
+                ux[0] = u0x; ux[1] = u1x; ux[2] = u2; ux[3] = u3x; ux[4] = u4x;
+                uy[0] = u0y; uy[1] = u1y; uy[2] = u2; uy[3] = u3y; uy[4] = u4y;
+
+                for (int kk = 0; kk<5; kk++) {cx[kk] = 0.0;}
+                for (int kk = 0; kk<5; kk++) {cy[kk] = 0.0;}
+
+                const Real A[5][5] = {
+                    {275.0/115.0,     25.0/288.0,     67.0/192.0,     25.0/288.0,     275.0/1152.0},
+                    {-55.0/96.0,      -5.0/48.0,      0.0,            5.0/48.0,       55.0/96.0},
+                    {1525.0/2016.0,   -475.0/504.0,   125.0/336.0,    -475.0/504.0,   1525.0/2016.0},
+                    {-25.0/48.0,      25.0/24.0,      0.0,           -25.0/24.0,      25.0/48.0},
+                    {125.0/336.0,     -125.0/84.0,    125.0/56.0,     -125.0/84.0,    125.0/336.0}
+                };
+
+                for (int row = 0; row < 5; ++row) {
+                  for (int col = 0; col < 5; ++col) {
+                    cx[row] += A[row][col] * ux[col];
+                    cy[row] += A[row][col] * uy[col];
+                  }
+                }
+
+                Real kappa3x = 0.0;
+                Real kappa3y = 0.0;
+                for (int jj = 0; jj < 5; ++jj) {
+                  kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
+                  kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
+                }
+                Real kappa3x_hat = cx[4] * cx[4] / 9.0;
+                Real kappa3y_hat = cy[4] * cy[4] / 9.0;
+
+                Real kappa3 = fmax(kappa3x, kappa3y);
+                Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
+
+                max_cN = fmax(kappa3_hat, max_cN);
+                max_sum_cN = fmax(kappa3, max_sum_cN);
+              }
+            // Kokkos::Max finds the maximum values over the entire meshblock
+            }, Kokkos::Max<Real>(cN), Kokkos::Max<Real>(sum_cN));
+          
+            // check if the Nth degree power exceeds the sum of powers
+          if (stencil == 3) {
+            Real N = 2.0;
+            Real threshold_refine = pow(N, 2.0 * alpha_refine);
+            Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen);
+
+            if (cN * threshold_refine > sum_cN) {
+              refine_flag_.d_view(m + mbs) = 1;
+            }
+            if (cN * threshold_coarsen < sum_cN) {
+              refine_flag_.d_view(m + mbs) = -1;
+            }
+          }
+          if (stencil == 5) {
+            Real N = 4.0;
+            Real threshold_refine = pow(N, 2.0 * alpha_refine);
+            Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen);
+
+            if (cN * threshold_refine > sum_cN) {
+              refine_flag_.d_view(m + mbs) = 1;
+            }
+            if (cN * threshold_coarsen < sum_cN) {
+              refine_flag_.d_view(m + mbs) = -1;
+            }
+          }
+        }
+
+        // custom AMR criteria for high-order derivitive with defined threshold values 
+        if (refine_threshold != 0.0 && coarsen_threshold != 0.0) {
           // loop over all of the cells in the MeshBlock in parallel
           Real team_deriv_max;
           Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
@@ -509,181 +687,13 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
               }
             }, Kokkos::Max<Real>(team_deriv_max));
 
-          if (team_deriv_max > alpha_refine) { refine_flag_.d_view(m + mbs) = 1; }
-          if (team_deriv_max < alpha_coarsen) { refine_flag_.d_view(m + mbs) = -1; }
+          if (team_deriv_max > refine_threshold) { refine_flag_.d_view(m + mbs) = 1; }
+          if (team_deriv_max < coarsen_threshold) { refine_flag_.d_view(m + mbs) = -1; }
         }
       } 
     ); 
   } 
  
-
-//       // custom AMR refinement criteria for power monitor (Deppe 2023)
-//       if (alpha_refine != 0.0 && alpha_coarsen != 0.0) {
-//         Real cN = 0.0;
-//         Real sum_cN = 0.0;
-//         // loop over all of the cells in the MeshBlock in parallel
-//         Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
-//           [=](const int idx, Real &max_cN, Real &max_sum_cN) {
-//             int k = (idx) / nji;
-//             int j = (idx - k * nji) / nx1;
-//             int i = (idx - k * nji - j * nx1) + is;
-//             j += js;
-//             k += ks;
-
-//             if (stencil == 3) {
-//               // solution values for cells of interest for 3-point stencil
-//               Real u1, u0x, u2x, u0y, u2y;
-//               if (variable == 1) {
-//                 u1 = w0(m, IDN, k, j, i);
-
-//                 u0x = w0(m, IDN, k, j, i - 1);
-//                 u2x = w0(m, IDN, k, j, i + 1); 
-
-//                 u0y = w0(m, IDN, k, j - 1, i);
-//                 u2y = w0(m, IDN, k, j + 1, i); 
-//               }
-//               if (variable == 2) {
-//                 u1 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
-
-//                 u0x = std::sqrt(SQR(w0(m, IVX, k, j, i-1)) + SQR(w0(m, IVY, k, j, i-1)));
-//                 u2x = std::sqrt(SQR(w0(m, IVX, k, j, i+1)) + SQR(w0(m, IVY, k, j, i+1))); 
-
-//                 u0y = std::sqrt(SQR(w0(m, IVX, k, j-1, i)) + SQR(w0(m, IVY, k, j-1, i)));
-//                 u2y = std::sqrt(SQR(w0(m, IVX, k, j+1, i)) + SQR(w0(m, IVY, k, j+1, i))); 
-//               }
-//               // create array of solution values and initialize modal coeffiecent array
-//               Real ux[3], uy[3], cx[3], cy[3]; 
-//               ux[0] = u0x; ux[1] = u1; ux[2] = u2x;
-//               uy[0] = u0y; uy[1] = u1; uy[2] = u2y;
-
-//               for (int ii = 0; ii<3; ii++) {cx[ii] = 0.0;}
-//               for (int ii = 0; ii<3; ii++) {cy[ii] = 0.0;}
-  
-//               // 3x3 Legendre coefficent matrix A
-//               const Real A[3][3] = {
-//                 {3.0/8.0,     1.0/4.0,      3.0/8.0},
-//                 {-3.0/4.0,    0.0,          3.0/4.0},
-//                 {3.0/4.0,     -3.0/2.0,     3.0/4.0}
-//               };
-//               // A * u = c
-//               for (int row = 0; row < 3; ++row) {
-//                 for (int col = 0; col < 3; ++col) {
-//                   cx[row] += A[row][col] * ux[col];
-//                   cy[row] += A[row][col] * uy[col];
-//                 }
-//               }
-//               // compute (c_N)^2 and sum_0^N((c_n)^2)... see equation (9) in Deppe 2023
-//               Real kappa3x = 0.0;
-//               Real kappa3y = 0.0;
-//               for (int jj = 0; jj < 3; ++jj) {
-//                 kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
-//                 kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
-//               }
-//               Real kappa3x_hat = cx[2] * cx[2] / 5.0;
-//               Real kappa3y_hat = cy[2] * cy[2] / 5.0;
-//               Real kappa3 = fmax(kappa3x, kappa3y);
-//               Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
-//               // extract kappa3_hat and kappa3 from parallel reduction
-//               max_cN = fmax(kappa3_hat, max_cN);
-//               max_sum_cN = fmax(kappa3, max_sum_cN);
-//             }
-//             if (stencil == 5) {
-//               Real u2, u0x, u1x, u3x, u4x, u0y, u1y, u3y, u4y;
-//               if (variable == 1) {
-//                 u2 = w0(m, IDN, k, j, i);
-
-//                 u0x = w0(m, IDN, k, j, i - 2);
-//                 u1x = w0(m, IDN, k, j, i - 1);
-//                 u3x = w0(m, IDN, k, j, i + 1);
-//                 u4x = w0(m, IDN, k, j, i + 2);
-
-//                 u0y = w0(m, IDN, k, j - 2, i);
-//                 u1y = w0(m, IDN, k, j - 1, i);
-//                 u3y = w0(m, IDN, k, j + 1, i);
-//                 u4y = w0(m, IDN, k, j + 2, i);
-//               }
-//               if (variable == 2) {
-//                 u2 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
-
-//                 u0x = std::sqrt(SQR(w0(m, IVX, k, j, i - 2)) + SQR(w0(m, IVY, k, j, i - 2)));
-//                 u1x = std::sqrt(SQR(w0(m, IVX, k, j, i - 1)) + SQR(w0(m, IVY, k, j, i - 1)));
-//                 u3x = std::sqrt(SQR(w0(m, IVX, k, j, i + 1)) + SQR(w0(m, IVY, k, j, i + 1)));
-//                 u4x = std::sqrt(SQR(w0(m, IVX, k, j, i + 2)) + SQR(w0(m, IVY, k, j, i + 2)));
-
-//                 u0y = std::sqrt(SQR(w0(m, IVX, k, j - 2, i)) + SQR(w0(m, IVY, k, j - 2,i)));
-//                 u1y = std::sqrt(SQR(w0(m, IVX, k,j - 1,i)) + SQR(w0(m, IVY,k,j - 1,i)));
-//                 u3y = std::sqrt(SQR(w0(m, IVX,k,j + 1,i)) + SQR(w0(m, IVY,k,j + 1,i)));
-//                 u4y = std::sqrt(SQR(w0(m, IVX,k,j + 2,i)) + SQR(w0(m, IVY,k,j + 2,i)));
-//               }
-
-//               Real ux[5], uy[5], cx[5], cy[5]; 
-//               ux[0] = u0x; ux[1] = u1x; ux[2] = u2; ux[3] = u3x; ux[4] = u4x;
-//               uy[0] = u0y; uy[1] = u1y; uy[2] = u2; uy[3] = u3y; uy[4] = u4y;
-
-//               for (int kk = 0; kk<5; kk++) {cx[kk] = 0.0;}
-//               for (int kk = 0; kk<5; kk++) {cy[kk] = 0.0;}
-
-//               const Real A[5][5] = {
-//                   {275.0/115.0,     25.0/288.0,     67.0/192.0,     25.0/288.0,     275.0/1152.0},
-//                   {-55.0/96.0,      -5.0/48.0,      0.0,            5.0/48.0,       55.0/96.0},
-//                   {1525.0/2016.0,   -475.0/504.0,   125.0/336.0,    -475.0/504.0,   1525.0/2016.0},
-//                   {-25.0/48.0,      25.0/24.0,      0.0,           -25.0/24.0,      25.0/48.0},
-//                   {125.0/336.0,     -125.0/84.0,    125.0/56.0,     -125.0/84.0,    125.0/336.0}
-//               };
-
-//               for (int row = 0; row < 5; ++row) {
-//                 for (int col = 0; col < 5; ++col) {
-//                   cx[row] += A[row][col] * ux[col];
-//                   cy[row] += A[row][col] * uy[col];
-//                 }
-//               }
-
-//               Real kappa3x = 0.0;
-//               Real kappa3y = 0.0;
-//               for (int jj = 0; jj < 5; ++jj) {
-//                 kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
-//                 kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
-//               }
-//               Real kappa3x_hat = cx[4] * cx[4] / 9.0;
-//               Real kappa3y_hat = cy[4] * cy[4] / 9.0;
-
-//               Real kappa3 = fmax(kappa3x, kappa3y);
-//               Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
-
-//               max_cN = fmax(kappa3_hat, max_cN);
-//               max_sum_cN = fmax(kappa3, max_sum_cN);
-//             }
-//           // Kokkos::Max finds the maximum values over the entire meshblock
-//           }, Kokkos::Max<Real>(cN), Kokkos::Max<Real>(sum_cN));
-        
-//           // check if the Nth degree power exceeds the sum of powers
-//         if (stencil == 3) {
-//           Real N = 2.0;
-//           Real threshold_refine = pow(N, 2.0 * alpha_refine);
-//           Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen);
-
-//           if (cN * threshold_refine > sum_cN) {
-//             refine_flag_.d_view(m + mbs) = 1;
-//           }
-//           if (cN * threshold_coarsen < sum_cN) {
-//             refine_flag_.d_view(m + mbs) = -1;
-//           }
-//         }
-//         if (stencil == 5) {
-//           Real N = 4.0;
-//           Real threshold_refine = pow(N, 2.0 * alpha_refine);
-//           Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen);
-
-//           if (cN * threshold_refine > sum_cN) {
-//             refine_flag_.d_view(m + mbs) = 1;
-//           }
-//           if (cN * threshold_coarsen < sum_cN) {
-//             refine_flag_.d_view(m + mbs) = -1;
-//           }
-//         }
-//       }
-//     });
-//   }
 // ---------------------------------------------------------------------------
 
 

@@ -1140,6 +1140,8 @@ def main(**kwargs):
 
     # Prepare figure
     plt.figure()
+    plt.xlabel('x1')
+    plt.ylabel('x2')
 
     # Plot data
     for block_num in range(num_blocks_used):

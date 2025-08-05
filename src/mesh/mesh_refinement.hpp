@@ -137,7 +137,7 @@ class MeshRefinement {
   // data
   Mesh *pmy_mesh;
   Real d_threshold_, dd_threshold_, dp_threshold_, dv_threshold_, chi_threshold_, min_curve_threshold_,
-       max_curve_threshold_, alpha_refine_, alpha_coarsen_;
+       max_curve_threshold_, alpha_refine_, alpha_coarsen_, refine_threshold_, coarsen_threshold_;
   bool check_cons_;
   int stencil_, variable_;
 };
