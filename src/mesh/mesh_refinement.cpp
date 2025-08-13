@@ -492,6 +492,24 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
         if (refine_threshold != 0.0 && coarsen_threshold != 0.0) {
           // loop over all of the cells in the MeshBlock in parallel
           Real team_deriv_max;
+          // second derivitive of momentum magnitude
+          auto mom_mag_1d = [&](int kk, int jj, int ii) -> Real {
+            Real mx = w0(m, IM1, kk, jj, ii);
+            return std::sqrt(mx*mx);
+          };
+          auto mom_mag_2d = [&](int kk, int jj, int ii) -> Real {
+            Real mx = w0(m, IM1, kk, jj, ii);
+            Real my = w0(m, IM2, kk, jj, ii);
+            return std::sqrt(mx*mx + my*my);
+          };
+          // second derivitive of momentum magnitude
+            auto mom_mag_3d = [&](int kk, int jj, int ii) -> Real {
+              Real mx = w0(m, IM1, kk, jj, ii);
+              Real my = w0(m, IM2, kk, jj, ii);
+              Real mz = w0(m, IM3, kk, jj, ii);
+              return std::sqrt(mx*mx + my*my + mz*mz);
+            };
+
           Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
             [=](const int idx, Real& deriv_max) {
               int k = (idx) / nji;
@@ -499,7 +517,84 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
               int i = (idx - k * nji - j * nx1) + is;
               j += js;
               k += ks;
-              if (multi_d) {
+              const bool one_d = !multi_d;
+              const bool two_d = multi_d && ! three_d;
+
+              if (one_d) {
+                if (stencil == 3) {
+                  if (variable == 3) {
+                    // second derivitive of density
+                    Real rho1 = w0(m, IDN, k, j, i);
+                    Real rho0x = w0(m, IDN, k, j, i - 1);
+                    Real rho2x = w0(m, IDN, k, j, i + 1);
+
+                    Real ddrho_x = rho2x - 2.0 * rho1 + rho0x;
+                    
+                    Real rho_error = fabs(ddrho_x) / (rho1 + 1e-15);
+
+                    Real mom1  = mom_mag_1d(k, j, i);
+                    Real mom0x = mom_mag_1d(k, j, i - 1);
+                    Real mom2x = mom_mag_1d(k, j, i + 1); 
+
+                    Real ddmom_x = mom2x - 2.0 * mom1 + mom0x;
+
+                    Real mom_error = fabs(ddmom_x) / (mom1 + 1e-15);
+
+                    // second derivitive of evolved energy
+                    Real ene1 = w0(m, IEN, k, j, i);
+                    Real ene0x = w0(m, IEN, k, j, i - 1);
+                    Real ene2x = w0(m, IEN, k, j, i + 1);
+
+                    Real ddene_x = ene2x - 2.0 * ene1 + ene0x;
+
+                    Real ene_error = fabs(ddene_x) / (ene1 + 1e-15);
+
+                    // maximum of density, momentum and evolved energy errors
+                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
+                    deriv_max = fmax(local_error, deriv_max);
+                  }
+                }
+                if (stencil == 5) {
+                  if (variable == 3) {
+                    // fourth derivitive of density
+                    Real rho2 = w0(m, IDN, k, j, i);
+                    Real rho0x = w0(m, IDN, k, j, i - 2);
+                    Real rho1x = w0(m, IDN, k, j, i - 1);
+                    Real rho3x = w0(m, IDN, k, j, i + 1);
+                    Real rho4x = w0(m, IDN, k, j, i + 2);
+
+                    Real ddddrho_x = rho4x - 4.0 * rho3x + 6.0 * rho2 - 4.0 * rho1x + rho0x;
+
+                    Real rho_error = fabs(ddddrho_x) / (rho2 + 1e-15);
+
+                    Real mom2  = mom_mag_1d(k, j, i);
+                    Real mom0x = mom_mag_1d(k, j, i - 2);
+                    Real mom1x = mom_mag_1d(k, j, i - 1);
+                    Real mom3x = mom_mag_1d(k, j, i + 1);
+                    Real mom4x = mom_mag_1d(k, j, i + 2);
+
+                    Real ddddmom_x = mom4x - 4.0 * mom3x + 6.0 * mom2 - 4.0 * mom1x + mom0x;
+
+                    Real mom_error = fabs(ddddmom_x) / (mom2 + 1e-15);
+
+                    // fourth derivitive of evolve energy
+                    Real ene2 = w0(m, IEN, k, j, i);
+                    Real ene0x = w0(m, IEN, k, j, i - 2);
+                    Real ene1x = w0(m, IEN, k, j, i - 1);
+                    Real ene3x = w0(m, IEN, k, j, i + 1);
+                    Real ene4x = w0(m, IEN, k, j, i + 2);
+
+                    Real ddddene_x = ene4x - 4.0 * ene3x + 6.0 * ene2 - 4.0 * ene1x + ene0x;
+
+                    Real ene_error = fabs(ddddene_x) / (ene2 + 1e-15);
+
+                    // maximum of density, momentum and evolved energy errors
+                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
+                    deriv_max = fmax(local_error, deriv_max);
+                  }
+                }
+              } 
+              else if (two_d) {
                 if (stencil == 3) {
                   if (variable == 3) {
                     // second derivitive of density
@@ -514,29 +609,34 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
                     
                     Real rho_error = fmax(fabs(ddrho_x), fabs(ddrho_y)) / (rho1 + 1e-15);
 
-                    // second derivitive of momentum magnitude
-                    auto mom_mag = [&](int kk, int jj, int ii) -> Real {
-                      Real mx = w0(m, IM1, kk, jj, ii);
-                      Real my = w0(m, IM2, kk, jj, ii);
-                      return std::sqrt(mx*mx + my*my);
-                    };
-
-                    Real mom1  = mom_mag(k, j, i);
-                    Real mom0x = mom_mag(k, j, i - 1);
-                    Real mom2x = mom_mag(k, j, i + 1); 
-                    Real mom0y = mom_mag(k, j - 1, i);
-                    Real mom2y = mom_mag(k, j + 1, i);
+                    Real mom1  = mom_mag_2d(k, j, i);
+                    Real mom0x = mom_mag_2d(k, j, i - 1);
+                    Real mom2x = mom_mag_2d(k, j, i + 1); 
+                    Real mom0y = mom_mag_2d(k, j - 1, i);
+                    Real mom2y = mom_mag_2d(k, j + 1, i);
 
                     Real ddmom_x = mom2x - 2.0 * mom1 + mom0x;
                     Real ddmom_y = mom2y - 2.0 * mom1 + mom0y;
 
                     Real mom_error = fmax(fabs(ddmom_x), fabs(ddmom_y)) / (mom1 + 1e-15);
 
-                    // maximum of density and momentum errors
-                    Real local_error = fmax(rho_error, mom_error);
+                    // second derivitive of evolved energy
+                    Real ene1 = w0(m, IEN, k, j, i);
+                    Real ene0x = w0(m, IEN, k, j, i - 1);
+                    Real ene2x = w0(m, IEN, k, j, i + 1);
+                    Real ene0y = w0(m, IEN, k, j - 1, i);
+                    Real ene2y = w0(m, IEN, k, j + 1, i);
+
+                    Real ddene_x = ene2x - 2.0 * ene1 + ene0x;
+                    Real ddene_y = ene2y - 2.0 * ene1 + ene0y;
+
+                    Real ene_error = fmax(fabs(ddene_x), fabs(ddene_y)) / (ene1 + 1e-15);
+
+                    // maximum of density, momentum and evolved energy errors
+                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
                     deriv_max = fmax(local_error, deriv_max);
                   }
-              }
+                }
                 if (stencil == 5) {
                   if (variable == 3) {
                     // fourth derivitive of density
@@ -555,35 +655,44 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
 
                     Real rho_error = fmax(fabs(ddddrho_x), fabs(ddddrho_y)) / (rho2 + 1e-15);
 
-                    // fourth derivitive of momentum magnitude
-                    auto mom_mag = [&](int kk, int jj, int ii) -> Real {
-                      Real mx = w0(m, IM1, kk, jj, ii);
-                      Real my = w0(m, IM2, kk, jj, ii);
-                      return std::sqrt(mx*mx + my*my);
-                    };
-
-                    Real mom2  = mom_mag(k, j, i);
-                    Real mom0x = mom_mag(k, j, i - 2);
-                    Real mom1x = mom_mag(k, j, i - 1);
-                    Real mom3x = mom_mag(k, j, i + 1);
-                    Real mom4x = mom_mag(k, j, i + 2);
-                    Real mom0y = mom_mag(k, j - 2, i);
-                    Real mom1y = mom_mag(k, j - 1, i);
-                    Real mom3y = mom_mag(k, j + 1, i);
-                    Real mom4y = mom_mag(k, j + 2, i);
+                    Real mom2  = mom_mag_2d(k, j, i);
+                    Real mom0x = mom_mag_2d(k, j, i - 2);
+                    Real mom1x = mom_mag_2d(k, j, i - 1);
+                    Real mom3x = mom_mag_2d(k, j, i + 1);
+                    Real mom4x = mom_mag_2d(k, j, i + 2);
+                    Real mom0y = mom_mag_2d(k, j - 2, i);
+                    Real mom1y = mom_mag_2d(k, j - 1, i);
+                    Real mom3y = mom_mag_2d(k, j + 1, i);
+                    Real mom4y = mom_mag_2d(k, j + 2, i);
 
                     Real ddddmom_x = mom4x - 4.0 * mom3x + 6.0 * mom2 - 4.0 * mom1x + mom0x;
                     Real ddddmom_y = mom4y - 4.0 * mom3y + 6.0 * mom2 - 4.0 * mom1y + mom0y;
 
                     Real mom_error = fmax(fabs(ddddmom_x), fabs(ddddmom_y)) / (mom2 + 1e-15);
 
-                    // maximum of density and momentum errors
-                    Real local_error = fmax(rho_error, mom_error);
+                    // fourth derivitive of evolve energy
+                    Real ene2 = w0(m, IEN, k, j, i);
+                    Real ene0x = w0(m, IEN, k, j, i - 2);
+                    Real ene1x = w0(m, IEN, k, j, i - 1);
+                    Real ene3x = w0(m, IEN, k, j, i + 1);
+                    Real ene4x = w0(m, IEN, k, j, i + 2);
+                    Real ene0y = w0(m, IEN, k, j - 2, i);
+                    Real ene1y = w0(m, IEN, k, j - 1, i);
+                    Real ene3y = w0(m, IEN, k, j + 1, i);
+                    Real ene4y = w0(m, IEN, k, j + 2, i);
+
+                    Real ddddene_x = ene4x - 4.0 * ene3x + 6.0 * ene2 - 4.0 * ene1x + ene0x;
+                    Real ddddene_y = ene4y - 4.0 * ene3y + 6.0 * ene2 - 4.0 * ene1y + ene0y;
+
+                    Real ene_error = fmax(fabs(ddddene_x), fabs(ddddene_y)) / (ene2 + 1e-15);
+
+                    // maximum of density, momentum and evolved energy errors
+                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
                     deriv_max = fmax(local_error, deriv_max);
                   }
-                }
-              }              
-              if (three_d) {
+                } 
+              }             
+              else {
                 if (stencil == 3) {
                   if (variable == 3) {
                     // second derivitive of density
@@ -601,21 +710,13 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
                     
                     Real rho_error = fmax(fabs(ddrho_x), fmax(fabs(ddrho_y), fabs(ddrho_z))) / (rho1 + 1e-15);
 
-                    // second derivitive of momentum magnitude
-                    auto mom_mag = [&](int kk, int jj, int ii) -> Real {
-                      Real mx = w0(m, IM1, kk, jj, ii);
-                      Real my = w0(m, IM2, kk, jj, ii);
-                      Real mz = w0(m, IM3, kk, jj, ii);
-                      return std::sqrt(mx*mx + my*my + mz*mz);
-                    };
-
-                    Real mom1  = mom_mag(k, j, i);
-                    Real mom0x = mom_mag(k, j, i - 1);
-                    Real mom2x = mom_mag(k, j, i + 1); 
-                    Real mom0y = mom_mag(k, j - 1, i);
-                    Real mom2y = mom_mag(k, j + 1, i);
-                    Real mom0z = mom_mag(k - 1, j, i);
-                    Real mom2z = mom_mag(k + 1, j, i);
+                    Real mom1  = mom_mag_3d(k, j, i);
+                    Real mom0x = mom_mag_3d(k, j, i - 1);
+                    Real mom2x = mom_mag_3d(k, j, i + 1); 
+                    Real mom0y = mom_mag_3d(k, j - 1, i);
+                    Real mom2y = mom_mag_3d(k, j + 1, i);
+                    Real mom0z = mom_mag_3d(k - 1, j, i);
+                    Real mom2z = mom_mag_3d(k + 1, j, i);
 
                     Real ddmom_x = mom2x - 2.0 * mom1 + mom0x;
                     Real ddmom_y = mom2y - 2.0 * mom1 + mom0y;
@@ -623,11 +724,26 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
 
                     Real mom_error = fmax(fabs(ddmom_x), fmax(fabs(ddmom_y), fabs(ddmom_z))) / (mom1 + 1e-15);
 
-                    // maximum of density and momentum errors
-                    Real local_error = fmax(rho_error, mom_error);
+                    // second derivitive of evolved energy
+                    Real ene1 = w0(m, IEN, k, j, i);
+                    Real ene0x = w0(m, IEN, k, j, i - 1);
+                    Real ene2x = w0(m, IEN, k, j, i + 1);
+                    Real ene0y = w0(m, IEN, k, j - 1, i);
+                    Real ene2y = w0(m, IEN, k, j + 1, i);
+                    Real ene0z = w0(m, IEN, k - 1, j, i);
+                    Real ene2z = w0(m, IEN, k + 1, j, i);
+
+                    Real ddene_x = ene2x - 2.0 * ene1 + ene0x;
+                    Real ddene_y = ene2y - 2.0 * ene1 + ene0y;
+                    Real ddene_z = ene2z - 2.0 * ene1 + ene0z;
+
+                    Real ene_error = fmax(fabs(ddene_x), fmax(fabs(ddene_y), fabs(ddene_z))) / (ene1 + 1e-15);
+
+                    // maximum of density, momentum and evolved energy errors
+                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
                     deriv_max = fmax(local_error, deriv_max);
                   }
-              }
+                }
                 if (stencil == 5) {
                   if (variable == 3) {
                     // fourth derivitive of density
@@ -651,27 +767,19 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
 
                     Real rho_error = fmax(fabs(ddddrho_x), fmax(fabs(ddddrho_y), fabs(ddddrho_z))) / (rho2 + 1e-15);
 
-                    // fourth derivitive of momentum magnitude
-                    auto mom_mag = [&](int kk, int jj, int ii) -> Real {
-                      Real mx = w0(m, IM1, kk, jj, ii);
-                      Real my = w0(m, IM2, kk, jj, ii);
-                      Real mz = w0(m, IM3, kk, jj, ii);
-                      return std::sqrt(mx*mx + my*my + mz*mz);
-                    };
-
-                    Real mom2  = mom_mag(k, j, i);
-                    Real mom0x = mom_mag(k, j, i - 2);
-                    Real mom1x = mom_mag(k, j, i - 1);
-                    Real mom3x = mom_mag(k, j, i + 1);
-                    Real mom4x = mom_mag(k, j, i + 2);
-                    Real mom0y = mom_mag(k, j - 2, i);
-                    Real mom1y = mom_mag(k, j - 1, i);
-                    Real mom3y = mom_mag(k, j + 1, i);
-                    Real mom4y = mom_mag(k, j + 2, i);
-                    Real mom0z = mom_mag(k - 2, j, i);
-                    Real mom1z = mom_mag(k - 1, j, i);
-                    Real mom3z = mom_mag(k + 1, j, i);
-                    Real mom4z = mom_mag(k + 2, j, i);
+                    Real mom2  = mom_mag_3d(k, j, i);
+                    Real mom0x = mom_mag_3d(k, j, i - 2);
+                    Real mom1x = mom_mag_3d(k, j, i - 1);
+                    Real mom3x = mom_mag_3d(k, j, i + 1);
+                    Real mom4x = mom_mag_3d(k, j, i + 2);
+                    Real mom0y = mom_mag_3d(k, j - 2, i);
+                    Real mom1y = mom_mag_3d(k, j - 1, i);
+                    Real mom3y = mom_mag_3d(k, j + 1, i);
+                    Real mom4y = mom_mag_3d(k, j + 2, i);
+                    Real mom0z = mom_mag_3d(k - 2, j, i);
+                    Real mom1z = mom_mag_3d(k - 1, j, i);
+                    Real mom3z = mom_mag_3d(k + 1, j, i);
+                    Real mom4z = mom_mag_3d(k + 2, j, i);
 
                     Real ddddmom_x = mom4x - 4.0 * mom3x + 6.0 * mom2 - 4.0 * mom1x + mom0x;
                     Real ddddmom_y = mom4y - 4.0 * mom3y + 6.0 * mom2 - 4.0 * mom1y + mom0y;
@@ -679,8 +787,29 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
 
                     Real mom_error = fmax(fabs(ddddmom_x), fmax(fabs(ddddmom_y), fabs(ddddmom_z))) / (mom2 + 1e-15);
 
+                    // fourth derivitive of evolve energy
+                    Real ene2 = w0(m, IEN, k, j, i);
+                    Real ene0x = w0(m, IEN, k, j, i - 2);
+                    Real ene1x = w0(m, IEN, k, j, i - 1);
+                    Real ene3x = w0(m, IEN, k, j, i + 1);
+                    Real ene4x = w0(m, IEN, k, j, i + 2);
+                    Real ene0y = w0(m, IEN, k, j - 2, i);
+                    Real ene1y = w0(m, IEN, k, j - 1, i);
+                    Real ene3y = w0(m, IEN, k, j + 1, i);
+                    Real ene4y = w0(m, IEN, k, j + 2, i);
+                    Real ene0z = w0(m, IEN, k - 2, j, i);
+                    Real ene1z = w0(m, IEN, k - 1, j, i);
+                    Real ene3z = w0(m, IEN, k + 1, j, i);
+                    Real ene4z = w0(m, IEN, k + 2, j, i);
+
+                    Real ddddene_x = ene4x - 4.0 * ene3x + 6.0 * ene2 - 4.0 * ene1x + ene0x;
+                    Real ddddene_y = ene4y - 4.0 * ene3y + 6.0 * ene2 - 4.0 * ene1y + ene0y;
+                    Real ddddene_z = ene4z - 4.0 * ene3z + 6.0 * ene2 - 4.0 * ene1z + ene0z;
+
+                    Real ene_error = fmax(fabs(ddddene_x), fmax(fabs(ddddene_y), fabs(ddddene_z))) / (ene2 + 1e-15);
+
                     // maximum of density and momentum errors
-                    Real local_error = fmax(rho_error, mom_error);
+                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
                     deriv_max = fmax(local_error, deriv_max);
                   }
                 }
@@ -691,12 +820,9 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
           if (team_deriv_max < coarsen_threshold) { refine_flag_.d_view(m + mbs) = -1; }
         }
       } 
-    ); 
-  } 
- 
-// ---------------------------------------------------------------------------
-
-
+    );
+  }
+  // ---------------------------------------------------------------------------
   // Check (on device) user-defined refinement condition(s), if any
   if (pmy_mesh->pgen->user_ref_func != nullptr) {
     pmy_mesh->pgen->user_ref_func(pmbp);
