@@ -492,6 +492,7 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
         if (refine_threshold != 0.0 && coarsen_threshold != 0.0) {
           // loop over all of the cells in the MeshBlock in parallel
           Real team_deriv_max;
+
           // second derivitive of momentum magnitude
           auto mom_mag_1d = [&](int kk, int jj, int ii) -> Real {
             Real mx = w0(m, IM1, kk, jj, ii);
@@ -503,12 +504,34 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
             return std::sqrt(mx*mx + my*my);
           };
           // second derivitive of momentum magnitude
-            auto mom_mag_3d = [&](int kk, int jj, int ii) -> Real {
+          auto mom_mag_3d = [&](int kk, int jj, int ii) -> Real {
+            Real mx = w0(m, IM1, kk, jj, ii);
+            Real my = w0(m, IM2, kk, jj, ii);
+            Real mz = w0(m, IM3, kk, jj, ii);
+            return std::sqrt(mx*mx + my*my + mz*mz);
+          };
+          // function to compute the sigma hot
+          auto sigmah_rel = [&](int kk, int jj, int ii) -> Real {
+              Real Bx = w0(m, IBX, kk, jj, ii);
+              Real By = w0(m, IBY, kk, jj, ii);
+              Real Bz = w0(m, IBZ, kk, jj, ii);
+              Real B2 = SQR(Bx) + SQR(By) + SQR(Bz);
+
+              Real rho = w0(m, IDN, kk, jj, ii);
+              Real di  = 1.0 / rho;
+
               Real mx = w0(m, IM1, kk, jj, ii);
               Real my = w0(m, IM2, kk, jj, ii);
               Real mz = w0(m, IM3, kk, jj, ii);
-              return std::sqrt(mx*mx + my*my + mz*mz);
-            };
+              Real e_k = 0.5 * di * (SQR(mx) + SQR(my) + SQR(mz));
+
+              Real e_m = 0.5 * B2;
+              Real u_gas = w0(m, IEN, kk, jj, ii) - e_k - e_m;
+
+              Real p_gas = w0(m, IPR, kk, jj, ii);
+
+              return B2 / (rho + u_gas + p_gas);
+          };
 
           Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
             [=](const int idx, Real& deriv_max) {
@@ -767,6 +790,7 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
 
                     Real rho_error = fmax(fabs(ddddrho_x), fmax(fabs(ddddrho_y), fabs(ddddrho_z))) / (rho2 + 1e-15);
 
+                    // fourth derivitive of momentum magnitude
                     Real mom2  = mom_mag_3d(k, j, i);
                     Real mom0x = mom_mag_3d(k, j, i - 2);
                     Real mom1x = mom_mag_3d(k, j, i - 1);
@@ -807,9 +831,31 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
                     Real ddddene_z = ene4z - 4.0 * ene3z + 6.0 * ene2 - 4.0 * ene1z + ene0z;
 
                     Real ene_error = fmax(fabs(ddddene_x), fmax(fabs(ddddene_y), fabs(ddddene_z))) / (ene2 + 1e-15);
+                    
+                    // fourth derivitive of sigma hot
+                    Real sigmah2 = sigmah_rel(k, j, i);
+                    Real sigmah0x = sigmah_rel(k, j, i - 2);
+                    Real sigmah1x = sigmah_rel(k, j, i - 1);
+                    Real sigmah3x = sigmah_rel(k, j, i + 1);
+                    Real sigmah4x = sigmah_rel(k, j, i + 2);
+                    Real sigmah0y = sigmah_rel(k, j - 2, i);
+                    Real sigmah1y = sigmah_rel(k, j - 1, i);
+                    Real sigmah3y = sigmah_rel(k, j + 1, i);
+                    Real sigmah4y = sigmah_rel(k, j + 2, i);
+                    Real sigmah0z = sigmah_rel(k - 2, j, i);
+                    Real sigmah1z = sigmah_rel(k - 1, j, i);
+                    Real sigmah3z = sigmah_rel(k + 1, j, i);
+                    Real sigmah4z = sigmah_rel(k + 2, j, i);  
 
-                    // maximum of density and momentum errors
-                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
+                    Real ddddsigmah_x = sigmah4x - 4.0 * sigmah3x + 6.0 * sigmah2 - 4.0 * sigmah1x + sigmah0x;
+                    Real ddddsigmah_y = sigmah4y - 4.0 * sigmah3y + 6.0 * sigmah2 - 4.0 * sigmah1y + sigmah0y;
+                    Real ddddsigmah_z = sigmah4z - 4.0 * sigmah3z + 6.0 * sigmah2 - 4.0 * sigmah1z + sigmah0z;
+
+                    Real sigmah_error = fmax(fabs(ddddsigmah_x), fmax(fabs(ddddsigmah_y), fabs(ddddsigmah_z))) / (sigmah2 + 1e-15);
+
+
+                    // maximum of density, momentum errors, energy and sigma hot errors
+                    Real local_error = fmax(rho_error, fmax(mom_error, fmax(sigmah_error, ene_error)));
                     deriv_max = fmax(local_error, deriv_max);
                   }
                 }
