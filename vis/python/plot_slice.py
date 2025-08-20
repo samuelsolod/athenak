@@ -1140,9 +1140,11 @@ def main(**kwargs):
 
     # Prepare figure
     plt.figure()
-    plt.xlabel('x1')
-    plt.ylabel('x2')
-
+    plt.xlabel('x1', fontsize=18)
+    plt.ylabel('x2', fontsize=18)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
+    
     # Plot data
     for block_num in range(num_blocks_used):
         plt.imshow(quantity[block_num], cmap=kwargs['cmap'], norm=norm, vmin=vmin,
@@ -1152,7 +1154,9 @@ def main(**kwargs):
     
 
     # Make colorbar
-    plt.colorbar(label=label)
+    cbar = plt.colorbar()
+    cbar.set_label(label, fontsize=18)      # match axis label font size
+    cbar.ax.tick_params(labelsize=14)       # match axis tick label size
     
     # Set limits for axes to remove whitespace
     # plt.xlim(-0.2, 0.2)

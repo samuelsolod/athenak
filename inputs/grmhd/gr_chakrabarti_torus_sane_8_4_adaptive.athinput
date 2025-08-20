@@ -11,7 +11,7 @@ reference = Chakrabarti, S. 1985, ApJ 288, 1
 basename  = torus
 
 <restart>
-restart_filename = /data/solod/simulations/grTorus/testTorus/simulation_22/rst/torus.00009.rst
+restart_filename = /data/solod/simulations/grTorus/testTorus/simulation_25/rst/torus.00014.rst
 
 <mesh>
 nghost = 4        # Number of ghost cells
@@ -41,21 +41,20 @@ nx3  = 16         # Number of cells in each MeshBlock, X3-dir
 <mesh_refinement>
 refinement = adaptive
 num_levels = 6 
-refinement_interval = 10
+refinement_interval = 100
 max_nmb_per_rank = 1400
-
-stencil_order = 5            # 3 point, 5 point
-variable = 3                 # 1 = density, 2 = velocity, 3 = density, magnitude of momentum, evolved energy
-refine_threshold = 10000      # refine threshold for high order derivitive criteria
-coarsen_threshold = 1000    # coarsen threshold for high order derivitive criteria
-floor = 1e-4
 
 # dpres_max = 0.05
 # ddens_max = 0.3
 # curve_max = 0.1
 # curve_min = 0.001
-# alpha_refine = 3             # refine threshold for power moniter (Deppe 2023)
-# alpha_coarsen = 4            # coarsening threshold for power moniter (Deppe 2023)
+
+#alpha_refine = 5             # refine threshold for power moniter (Deppe 2023)
+#alpha_coarsen = 6            # coarsening threshold for power moniter (Deppe 2023)
+stencil_order = 5            # 3 point, 5 point
+variable = 3                 # 1 = density, 2 = velocity, 3 = density and momentum
+refine_threshold = 500      # refine threshold for high order derivitive criteria
+coarsen_threshold = 5    # coarsen threshold for high order derivitive criteria
 
 <refinement1>
 level = 1
@@ -119,7 +118,7 @@ pexcise     = 0.333e-10  # pressure inside excision
 
 <mhd>
 eos         = ideal      # EOS type
-reconstruct = wenoz       # spatial reconstruction method
+reconstruct = plm       # spatial reconstruction method
 rsolver     = hlle       # Riemann-solver to be used
 dfloor      = 1.0e-8     # floor on density rho
 pfloor      = 0.333e-10  # floor on gas pressure p_gas
@@ -152,8 +151,8 @@ user_hist_only = true   # only output user-defined history
 <output2>
 file_type  = bin        # Binary data dump
 variable   = mhd_w_bcc  # variables to be output
-dcycle = 10.0
+dcycle = 100.0
 
 <output3>
 file_type  = rst
-dcycle = 10.0      
+dcycle = 100.0      
