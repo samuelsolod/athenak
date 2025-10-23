@@ -242,8 +242,40 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   const int nkji = nx3 * nx2 * nx1;
   const int nji = nx2 * nx1;
 
+<<<<<<< HEAD
   // check (on device) Hydro/MHD refinement conditions for cons vars over all MeshBlocks
   auto refine_flag_ = refine_flag;
+=======
+  // iterate through list of refinement criteria and apply methods
+  for (auto it = pmrc->rcrit.begin(); it != pmrc->rcrit.end(); ++it) {
+    switch (it->rmethod) {
+      case RefCritMethod::min_max:
+        pmrc->CheckMinMax(pmbp, *it);
+        break;
+      case RefCritMethod::slope:
+        pmrc->CheckSlope(pmbp, *it);
+        break;
+      case RefCritMethod::second_deriv:
+        pmrc->CheckSecondDeriv(pmbp, *it);
+        break;
+      case RefCritMethod::location:
+        pmrc->CheckLocation(pmbp, *it);
+        break;
+      case RefCritMethod::spectral_norm:
+        pmrc->CheckSpectralNorm(pmbp, *it);
+        break;
+      case RefCritMethod::user:
+        pmy_mesh->pgen->user_ref_func(pmbp);
+        break;
+      default:
+        std::cout<<"### FATAL ERROR in "<<__FILE__<<" at line "<<__LINE__<<std::endl;
+        Kokkos::abort("Unknown refinement method requested in a <refinement_criteria>");
+        break;
+    }
+  }
+
+  // Turn off (on host) refine/derefine flag for MeshBlocks at max/root level
+>>>>>>> 8fcd358 ([wip] Add spectral norm criteria)
   int nmb = pmbp->nmb_thispack;
   int mbs = pmy_mesh->gids_eachrank[global_variable::my_rank];
 
