@@ -86,6 +86,9 @@ RefinementCriteria::RefinementCriteria(Mesh *pm, ParameterInput *pin) :
       rcrit0.use_primitives =
           pin->GetOrAddBoolean(it->block_name, "use_primitives", false);
 
+      rcrit0.monitor_magnetic_field =
+          pin->GetOrAddBoolean(it->block_name, "monitor_magnetic_field", false);
+
       rcrit.emplace_back(rcrit0);
     }
   }
@@ -450,6 +453,9 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
   auto &monitor_momentum = crit.monitor_momentum;
   auto &monitor_energy = crit.monitor_energy;
 
+  const bool monitor_magnetic_field =
+      crit.monitor_magnetic_field && (pmbp->pmhd != nullptr);
+
   par_for_outer(
       "SpectralNorm", DevExeSpace(), 0, 0, 0, (nmb - 1),
       KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
@@ -476,6 +482,7 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
                  6.0 * var(m, IDX, k, j, i) - 4.0 * var(m, IDX, k - 1, j, i) +
                  var(m, IDX, k - 2, j, i);
         };
+
         // Another free function -- might need this for momentum criteria
         auto compute_d4u = [](const Real qp2, const Real qp1, const Real q,
                               const Real qm1, const Real qm2) {
@@ -488,7 +495,7 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
 
         // Error measure reduced within a single MB
         Real team_abs_d4u_over_u_max = 0.0;
-
+        
         // Spectral norm method: check the evolved density variable
         Kokkos::parallel_reduce(
             Kokkos::TeamThreadRange(tmember, nkji),
@@ -704,11 +711,242 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
               flag_coarsen and (team_abs_d4u_over_u_max < thres_coarsen);
         }
 
+        //
+        // Spectral norm method: check the magnitude of B field
+        //
+        // if (monitor_magnetic_field) {
+
+        //   Kokkos::parallel_reduce(
+        //       Kokkos::TeamThreadRange(tmember, nkji),
+        //       [=](const int idx, Real &max_error) {
+        //         int k = (idx) / nji;
+        //         int j = (idx - k * nji) / nx1;
+        //         int i = (idx - k * nji - j * nx1) + is;
+        //         j += js;
+        //         k += ks;
+
+        //         auto get_magnetic_field_magnitude =
+        //             [&bcc, &multi_d, &three_d](const int m, const int k,
+        //                                        const int j, const int i) {
+        //               if (three_d) {
+        //                 return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
+        //                                  SQR(bcc(m, IBY, k, j, i)) +
+        //                                  SQR(bcc(m, IBZ, k, j, i)));
+
+        //               } else if (multi_d) {
+        //                 return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
+        //                                  SQR(bcc(m, IBY, k, j, i)));
+        //               } else {
+        //                 return fabs(bcc(m, IBX, k, j, i));
+        //               }
+        //             };
+
+        //         Real abs_d4u_over_u{0.0};
+
+        //         // @yk: monitor the AMR criteria only when rho > rho_floor
+        //         if (u0(m, IDN, k, j, i) > dfloor) {
+
+        //           abs_d4u_over_u = fabs(compute_d4u(
+        //               get_magnetic_field_magnitude(m, k, j, i + 2),
+        //               get_magnetic_field_magnitude(m, k, j, i + 1),
+        //               get_magnetic_field_magnitude(m, k, j, i),
+        //               get_magnetic_field_magnitude(m, k, j, i - 1),
+        //               get_magnetic_field_magnitude(m, k, j, i - 2)));
+
+        //           if (multi_d) {
+        //             if (spectral_norm_error_policy ==
+        //                 error_policy_for_multi_dim::sum) {
+        //               abs_d4u_over_u += fabs(compute_d4u(
+        //                   get_magnetic_field_magnitude(m, k, j + 2, i),
+        //                   get_magnetic_field_magnitude(m, k, j + 1, i),
+        //                   get_magnetic_field_magnitude(m, k, j, i),
+        //                   get_magnetic_field_magnitude(m, k, j - 1, i),
+        //                   get_magnetic_field_magnitude(m, k, j - 2, i)));
+        //             } else {
+        //               abs_d4u_over_u = fmax(
+        //                   abs_d4u_over_u,
+        //                   fabs(compute_d4u(
+        //                       get_magnetic_field_magnitude(m, k, j + 2, i),
+        //                       get_magnetic_field_magnitude(m, k, j + 1, i),
+        //                       get_magnetic_field_magnitude(m, k, j, i),
+        //                       get_magnetic_field_magnitude(m, k, j - 1, i),
+        //                       get_magnetic_field_magnitude(m, k, j - 2, i))));
+        //             }
+        //           }
+
+        //           if (three_d) {
+        //             if (spectral_norm_error_policy ==
+        //                 error_policy_for_multi_dim::sum) {
+        //               abs_d4u_over_u += fabs(compute_d4u(
+        //                   get_magnetic_field_magnitude(m, k + 2, j, i),
+        //                   get_magnetic_field_magnitude(m, k + 1, j, i),
+        //                   get_magnetic_field_magnitude(m, k, j, i),
+        //                   get_magnetic_field_magnitude(m, k - 1, j, i),
+        //                   get_magnetic_field_magnitude(m, k - 2, j, i)));
+        //             } else {
+        //               abs_d4u_over_u = fmax(
+        //                   abs_d4u_over_u,
+        //                   fabs(compute_d4u(
+        //                       get_magnetic_field_magnitude(m, k + 2, j, i),
+        //                       get_magnetic_field_magnitude(m, k + 1, j, i),
+        //                       get_magnetic_field_magnitude(m, k, j, i),
+        //                       get_magnetic_field_magnitude(m, k - 1, j, i),
+        //                       get_magnetic_field_magnitude(m, k - 2, j, i))));
+        //             }
+        //           }
+
+        //           // normalize with the local value at (i,j,k)
+        //           abs_d4u_over_u /=
+        //               (get_magnetic_field_magnitude(m, k, j, i) +
+        //                1e-15); // @yk: this epsilon value to avoid div-by-zero
+        //                        // may be implemented in a better way
+        //         }
+
+        //         max_error = fmax(max_error, abs_d4u_over_u);
+        //       },
+        //       Kokkos::Max<Real>(team_abs_d4u_over_u_max));
+
+        //   if (team_abs_d4u_over_u_max > thres_refine) {
+        //     flag = 1;
+        //     return;
+        //   }
+        //   flag_coarsen =
+        //       flag_coarsen and (team_abs_d4u_over_u_max < thres_coarsen);
+        // }
+
         // only derefine when flag has not been set by other criteria
         if (flag_coarsen && (flag == 0)) {
           flag = -1;
         }
       });
+
+  //
+  // Spectral norm method: check the magnitude of B field
+  //
+  if (monitor_magnetic_field) {
+    auto &bcc = pmbp->pmhd->bcc0; // cell-centered magnetic field
+
+    par_for_outer(
+        "SpectralNorm", DevExeSpace(), 0, 0, 0, (nmb - 1),
+        KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+          // Grid refinement flag
+          int &flag = refine_flag.d_view(m + mbs);
+
+          // Error measure reduced within a single MB
+          Real team_abs_d4u_over_u_max = 0.0;
+
+          Kokkos::parallel_reduce(
+              Kokkos::TeamThreadRange(tmember, nkji),
+              [=](const int idx, Real &max_error) {
+                int k = (idx) / nji;
+                int j = (idx - k * nji) / nx1;
+                int i = (idx - k * nji - j * nx1) + is;
+                j += js;
+                k += ks;
+
+                // Another free function -- might need this for momentum
+                // criteria
+                auto compute_d4u = [](const Real qp2, const Real qp1,
+                                      const Real q, const Real qm1,
+                                      const Real qm2) {
+                  return qp2 - 4.0 * qp1 + 6.0 * q - 4.0 * qm1 + qm2;
+                };
+
+                auto get_magnetic_field_magnitude =
+                    [&bcc, &multi_d, &three_d](const int m, const int k,
+                                               const int j, const int i) {
+                      if (three_d) {
+                        return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
+                                         SQR(bcc(m, IBY, k, j, i)) +
+                                         SQR(bcc(m, IBZ, k, j, i)));
+
+                      } else if (multi_d) {
+                        return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
+                                         SQR(bcc(m, IBY, k, j, i)));
+                      } else {
+                        return fabs(bcc(m, IBX, k, j, i));
+                      }
+                    };
+
+                Real abs_d4u_over_u{0.0};
+
+                // @yk: monitor the AMR criteria only when rho > rho_floor
+                if (u0(m, IDN, k, j, i) > dfloor) {
+
+                  abs_d4u_over_u = fabs(compute_d4u(
+                      get_magnetic_field_magnitude(m, k, j, i + 2),
+                      get_magnetic_field_magnitude(m, k, j, i + 1),
+                      get_magnetic_field_magnitude(m, k, j, i),
+                      get_magnetic_field_magnitude(m, k, j, i - 1),
+                      get_magnetic_field_magnitude(m, k, j, i - 2)));
+
+                  if (multi_d) {
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u_over_u += fabs(compute_d4u(
+                          get_magnetic_field_magnitude(m, k, j + 2, i),
+                          get_magnetic_field_magnitude(m, k, j + 1, i),
+                          get_magnetic_field_magnitude(m, k, j, i),
+                          get_magnetic_field_magnitude(m, k, j - 1, i),
+                          get_magnetic_field_magnitude(m, k, j - 2, i)));
+                    } else {
+                      abs_d4u_over_u = fmax(
+                          abs_d4u_over_u,
+                          fabs(compute_d4u(
+                              get_magnetic_field_magnitude(m, k, j + 2, i),
+                              get_magnetic_field_magnitude(m, k, j + 1, i),
+                              get_magnetic_field_magnitude(m, k, j, i),
+                              get_magnetic_field_magnitude(m, k, j - 1, i),
+                              get_magnetic_field_magnitude(m, k, j - 2, i))));
+                    }
+                  }
+
+                  if (three_d) {
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u_over_u += fabs(compute_d4u(
+                          get_magnetic_field_magnitude(m, k + 2, j, i),
+                          get_magnetic_field_magnitude(m, k + 1, j, i),
+                          get_magnetic_field_magnitude(m, k, j, i),
+                          get_magnetic_field_magnitude(m, k - 1, j, i),
+                          get_magnetic_field_magnitude(m, k - 2, j, i)));
+                    } else {
+                      abs_d4u_over_u = fmax(
+                          abs_d4u_over_u,
+                          fabs(compute_d4u(
+                              get_magnetic_field_magnitude(m, k + 2, j, i),
+                              get_magnetic_field_magnitude(m, k + 1, j, i),
+                              get_magnetic_field_magnitude(m, k, j, i),
+                              get_magnetic_field_magnitude(m, k - 1, j, i),
+                              get_magnetic_field_magnitude(m, k - 2, j, i))));
+                    }
+                  }
+
+                  // normalize with the local value at (i,j,k)
+                  abs_d4u_over_u /=
+                      (get_magnetic_field_magnitude(m, k, j, i) +
+                       1e-15); // @yk: this epsilon value to avoid div-by-zero
+                               // may be implemented in a better way
+                }
+
+                max_error = fmax(max_error, abs_d4u_over_u);
+              },
+              Kokkos::Max<Real>(team_abs_d4u_over_u_max));
+
+          if (team_abs_d4u_over_u_max > thres_refine) {
+            flag = 1;
+            return;
+          }
+
+          if (flag == -1) {
+            if (team_abs_d4u_over_u_max < thres_coarsen) {
+              return;
+            } else {
+              flag = 0;
+            }
+          }
+        });
+  }
 
   // sync device array with host
   refine_flag.template modify<DevExeSpace>();

@@ -69,6 +69,7 @@ struct RefCritData {
   bool monitor_momentum;
   bool monitor_energy;
   bool use_primitives;
+  bool monitor_magnetic_field;
 };
 
 //----------------------------------------------------------------------------------------
