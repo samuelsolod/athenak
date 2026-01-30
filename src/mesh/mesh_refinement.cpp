@@ -6,7 +6,6 @@
 //! \file mesh_refinement.cpp
 //! \brief Implements constructor and functions in MeshRefinement class.
 //! Note while restriction functions for CC and FC data are implemented in this file,
-
 //! prolongation operators are implemented as INLINE functions in prolongation.hpp (and
 //! are used both here for AMR and in the BVals class at fine/coarse boundaries).
 
@@ -21,6 +20,7 @@
 #include "parameter_input.hpp"
 #include "mesh.hpp"
 #include "mesh_refinement.hpp"
+#include "refinement_criteria.hpp"
 
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
@@ -48,20 +48,13 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   nmb_sent_thisrank(0),
   ncyc_check_amr(1),
   refinement_interval(5),
-  prolong_prims(false),
-  d_threshold_(0.0),
-  dd_threshold_(0.0),
-  dp_threshold_(0.0),
-  dv_threshold_(0.0),
-  max_curve_threshold_(0.0),
-  min_curve_threshold_(0.0),
-  stencil_(0),
-  alpha_refine_(0.0),
-  alpha_coarsen_(0.0),
-  refine_threshold_(0.0),
-  coarsen_threshold_(0.0),
-  variable_(0),
-  check_cons_(false) {
+#if MPI_PARALLEL_ENABLED
+  sendbuf("lb send buff",1),
+  recvbuf("lb recv buff",1),
+  send_data("lb send data",1),
+  recv_data("lb recv data",1),
+#endif
+  prolong_prims(false) {
   if (pin->DoesBlockExist("mesh_refinement")) {
     // read interval (in cycles) between check of AMR and derefinement
     ncyc_check_amr = pin->GetOrAddReal("mesh_refinement", "ncycle_check", 1);
@@ -70,56 +63,12 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
     if (pin->DoesParameterExist("mesh_refinement", "prolong_primitives")) {
       prolong_prims = pin->GetBoolean("mesh_refinement", "prolong_primitives");
     }
-    // read refinement criteria thresholds
-    if (pin->DoesParameterExist("mesh_refinement", "dens_max")) {
-      d_threshold_ = pin->GetReal("mesh_refinement", "dens_max");
-      check_cons_ = true;
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "ddens_max")) {
-      dd_threshold_ = pin->GetReal("mesh_refinement", "ddens_max");
-      check_cons_ = true;
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "dpres_max")) {
-      dp_threshold_ = pin->GetReal("mesh_refinement", "dpres_max");
-      check_cons_ = true;
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "dvel_max")) {
-      dd_threshold_ = pin->GetReal("mesh_refinement", "dvel_max");
-      check_cons_ = true;
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "curve_max")) {
-      max_curve_threshold_ = pin->GetReal("mesh_refinement", "curve_max");
-      check_cons_ = true;
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "curve_min")) {
-      min_curve_threshold_ = pin->GetReal("mesh_refinement", "curve_min");
-      check_cons_ = true;
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "stencil_order")) {
-      stencil_ = pin->GetInteger("mesh_refinement", "stencil_order");
-      check_cons_ = true;
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "alpha_refine")) {
-      alpha_refine_ = pin->GetReal("mesh_refinement", "alpha_refine");
-      check_cons_ = true;
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "alpha_coarsen")) {
-      alpha_coarsen_ = pin->GetReal("mesh_refinement", "alpha_coarsen");
-      check_cons_ = true;
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "variable")) {
-      variable_ = pin->GetInteger("mesh_refinement", "variable");
-      check_cons_ = true;
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "refine_threshold")) {
-      refine_threshold_ = pin->GetReal("mesh_refinement", "refine_threshold");
-    }
-    if (pin->DoesParameterExist("mesh_refinement", "coarsen_threshold")) {
-      coarsen_threshold_ = pin->GetReal("mesh_refinement", "coarsen_threshold");
-    }
   }
 
-  if (pm->adaptive) {  // allocate arrays for AMR
+  // allocate arrays for AMR
+  // NOTE: RefinementCriteria object cannot be allocated until Physics modules are defined
+  // This is done in Mesh::AddCoordinatesAndPhysics and not in this constructor
+  if (pm->adaptive) {
     nref_eachrank = new int[global_variable::nranks];
     nderef_eachrank = new int[global_variable::nranks];
     nref_rsum = new int[global_variable::nranks];
@@ -158,11 +107,13 @@ MeshRefinement::~MeshRefinement() {
 //----------------------------------------------------------------------------------------
 //! \fn void MeshRefinement::AdaptiveMeshRefinement()
 //! \brief Simple driver function for adaptive mesh refinement
+
 void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin) {
   // first check refinement criteria
   CheckForRefinement(pmy_mesh->pmb_pack);
 
   // then update mesh tree if MeshBlock anywhere (on any rank) is flagged for refinement
+  // indicated by the refine_flag[m] value being true (1) for any m.
   int nnew = 0, ndel = 0;
   UpdateMeshBlockTree(nnew, ndel);
 
@@ -190,62 +141,33 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
   }
   return;
 }
+
 //----------------------------------------------------------------------------------------
-//! \fn bool MeshRefinement::CheckForRefinement()
+//! \fn void RefinementCriteria::CheckForRefinement()
 //! \brief Checks for refinement/de-refinement and sets refine_flag(m) for all
-//! MeshBlocks within a MeshBlockPack. Returns true if any MeshBlock needs to be refined.
-//! Default refinement conditions implemented are:
-//!   (1) density max above a threshold value (hydro/MHD)
-//!   (2) gradient of density above a threshold value (hydro/MHD)
-//!   (3) gradient of pressure above a threshold value (hydro/MHD)
-//!   TODO(@user) (4) shear of velocity above a threshold value (hydro/MHD)
-//!   TODO(@user) (5) current density above a threshold (MHD)
-//! These are controlled by input parameters in the <mesh_refinement> block.
-//! User-defined refinement conditions can also be enrolled by setting the *usr_ref_func
-//! pointer in the problem generator.
-//! User defined refinement condtions: 
-//!    max_curve_threshold: maximum normalized curvature 
-//!    min_curve_threshold: minimum normalized curvature 
-//!    alpha_refine_: alpha_N threshold for refinement with power moniter
-//!    alpha_coarsen: alpha_N threshold for coarsening with power moniter
-//!    stencil: order of the stencil used for power monitor (integer)
-//!    variable: variable to do power moniter on (integer)
-//!             - 1: density
-//!             - 2: velocity
-//!             - 3: density and momentum
-//!    refine_threshold: threshold for refinement based on high order derivitves
-//!    coarsen_threshold: threshold for coarsening based on high order derivitves
+//! MeshBlocks within a MeshBlockPack.  Increments number of cycles since last refinement
+//! counter for all MeshBlocks
 
 void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   // reallocate and zero refine_flag in host space and sync with device
   Kokkos::realloc(refine_flag, pmy_mesh->nmb_total);
-  for (int m = 0; m < (pmy_mesh->nmb_total); ++m) {
+  for (int m=0; m<(pmy_mesh->nmb_total); ++m) {
     refine_flag.h_view(m) = 0;
   }
   refine_flag.template modify<HostMemSpace>();
   refine_flag.template sync<DevExeSpace>();
 
   // increment cycle counter for each MB
-  for (int m = 0; m < (pmy_mesh->nmb_total); ++m) {
+  for (int m=0; m<(pmy_mesh->nmb_total); ++m) {
     ncyc_since_ref(m) += 1;
   }
-  if ((pmbp->pmesh->ncycle) % (ncyc_check_amr) != 0) { return; }  // not cycle to check
+  if ((pmy_mesh->ncycle)%(ncyc_check_amr) != 0) {return;}  // not cycle to check
 
-  // capture variables for kernels
-  Mesh* pm = pmbp->pmesh;
-  auto& multi_d = pmy_mesh->multi_d;
-  auto& three_d = pmy_mesh->three_d;
-  auto& indcs = pmy_mesh->mb_indcs;
-  int& is = indcs.is, nx1 = indcs.nx1;
-  int& js = indcs.js, nx2 = indcs.nx2;
-  int& ks = indcs.ks, nx3 = indcs.nx3;
-  const int nkji = nx3 * nx2 * nx1;
-  const int nji = nx2 * nx1;
+  // calculate derived refinement variables
+  if (pmrc->nderived > 0) {
+    pmrc->SetRefinementData(pmbp, false, true);
+  }
 
-<<<<<<< HEAD
-  // check (on device) Hydro/MHD refinement conditions for cons vars over all MeshBlocks
-  auto refine_flag_ = refine_flag;
-=======
   // iterate through list of refinement criteria and apply methods
   for (auto it = pmrc->rcrit.begin(); it != pmrc->rcrit.end(); ++it) {
     switch (it->rmethod) {
@@ -275,641 +197,8 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   }
 
   // Turn off (on host) refine/derefine flag for MeshBlocks at max/root level
->>>>>>> 8fcd358 ([wip] Add spectral norm criteria)
   int nmb = pmbp->nmb_thispack;
   int mbs = pmy_mesh->gids_eachrank[global_variable::my_rank];
-
-  // capture input vairables fro refinement criteria
-  auto& dens_thresh = d_threshold_;
-  auto& ddens_thresh = dd_threshold_;
-  auto& dpres_thresh = dp_threshold_;
-  auto& alpha_refine = alpha_refine_;
-  auto& alpha_coarsen = alpha_coarsen_;
-  int& stencil = stencil_;
-  int& variable = variable_;
-  auto& refine_threshold = refine_threshold_;
-  auto& coarsen_threshold = coarsen_threshold_;
-
-  if (((pmbp->phydro != nullptr) || (pmbp->pmhd != nullptr)) && check_cons_) {
-    auto& u0 = (pmbp->phydro != nullptr) ? pmbp->phydro->u0 : pmbp->pmhd->u0;
-    auto& w0 = (pmbp->phydro != nullptr) ? pmbp->phydro->w0 : pmbp->pmhd->w0;
-
-    // run each MeshBlock in the MeshBlockPack in parallel
-    par_for_outer("ConsRefineCond", DevExeSpace(), 0, 0, 0, (nmb - 1),
-      KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
-        // density threshold
-        if (dens_thresh != 0.0) {
-          Real team_dmax = 0.0;
-          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
-            [=](const int idx, Real& dmax) {
-              int k = (idx) / nji;
-              int j = (idx - k * nji) / nx1;
-              int i = (idx - k * nji - j * nx1) + is;
-              j += js;
-              k += ks;
-              dmax = fmax(u0(m, IDN, k, j, i), dmax);
-            }, Kokkos::Max<Real>(team_dmax));
-
-          if (team_dmax > dens_thresh) { refine_flag_.d_view(m + mbs) = 1; }
-          if (team_dmax < dens_thresh) { refine_flag_.d_view(m + mbs) = -1; }
-        }
-
-        // density gradient threshold
-        if (ddens_thresh != 0.0) {
-          Real team_ddmax;
-          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
-            [=](const int idx, Real& ddmax) {
-              int k = (idx) / nji;
-              int j = (idx - k * nji) / nx1;
-              int i = (idx - k * nji - j * nx1) + is;
-              j += js;
-              k += ks;
-              Real d2 = SQR(u0(m, IDN, k, j, i + 1) - u0(m, IDN, k, j, i - 1));
-              if (multi_d) { d2 += SQR(u0(m, IDN, k, j + 1, i) - u0(m, IDN, k, j - 1, i)); }
-              if (three_d) { d2 += SQR(u0(m, IDN, k + 1, j, i) - u0(m, IDN, k - 1, j, i)); }
-              ddmax = fmax((sqrt(d2) / u0(m, IDN, k, j, i)), ddmax);
-            }, Kokkos::Max<Real>(team_ddmax));
-
-          if (team_ddmax > ddens_thresh) { refine_flag_.d_view(m + mbs) = 1; }
-          if (team_ddmax < 0.25 * ddens_thresh) { refine_flag_.d_view(m + mbs) = -1; }
-        }
-
-        // pressure gradient threshold
-        if (dpres_thresh != 0.0) {
-          Real team_dpmax;
-          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
-            [=](const int idx, Real& dpmax) {
-              int k = (idx) / nji;
-              int j = (idx - k * nji) / nx1;
-              int i = (idx - k * nji - j * nx1) + is;
-              j += js;
-              k += ks;
-              Real d2 = SQR(w0(m, IEN, k, j, i + 1) - w0(m, IEN, k, j, i - 1));
-              if (multi_d) { d2 += SQR(w0(m, IEN, k, j + 1, i) - w0(m, IEN, k, j - 1, i)); }
-              if (three_d) { d2 += SQR(w0(m, IEN, k + 1, j, i) - w0(m, IEN, k - 1, j, i)); }
-              dpmax = fmax((sqrt(d2) / w0(m, IEN, k, j, i)), dpmax);
-            }, Kokkos::Max<Real>(team_dpmax));
-
-          if (team_dpmax > dpres_thresh) { refine_flag_.d_view(m + mbs) = 1; }
-          if (team_dpmax < 0.25 * dpres_thresh) { refine_flag_.d_view(m + mbs) = -1; }
-        }
-
-        // custom AMR refinement criteria for power monitor (Deppe 2023)
-        if (alpha_refine != 0.0 && alpha_coarsen != 0.0) {
-          Real cN = 0.0;
-          Real sum_cN = 0.0;
-          // loop over all of the cells in the MeshBlock in parallel
-          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
-            [=](const int idx, Real &max_cN, Real &max_sum_cN) {
-              int k = (idx) / nji;
-              int j = (idx - k * nji) / nx1;
-              int i = (idx - k * nji - j * nx1) + is;
-              j += js;
-              k += ks;
-
-              if (stencil == 3) {
-                // solution values for cells of interest for 3-point stencil
-                Real u1, u0x, u2x, u0y, u2y;
-                if (variable == 1) {
-                  u1 = w0(m, IDN, k, j, i);
-
-                  u0x = w0(m, IDN, k, j, i - 1);
-                  u2x = w0(m, IDN, k, j, i + 1); 
-
-                  u0y = w0(m, IDN, k, j - 1, i);
-                  u2y = w0(m, IDN, k, j + 1, i); 
-                }
-                if (variable == 2) {
-                  u1 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
-
-                  u0x = std::sqrt(SQR(w0(m, IVX, k, j, i-1)) + SQR(w0(m, IVY, k, j, i-1)));
-                  u2x = std::sqrt(SQR(w0(m, IVX, k, j, i+1)) + SQR(w0(m, IVY, k, j, i+1))); 
-
-                  u0y = std::sqrt(SQR(w0(m, IVX, k, j-1, i)) + SQR(w0(m, IVY, k, j-1, i)));
-                  u2y = std::sqrt(SQR(w0(m, IVX, k, j+1, i)) + SQR(w0(m, IVY, k, j+1, i))); 
-                }
-                // create array of solution values and initialize modal coeffiecent array
-                Real ux[3], uy[3], cx[3], cy[3]; 
-                ux[0] = u0x; ux[1] = u1; ux[2] = u2x;
-                uy[0] = u0y; uy[1] = u1; uy[2] = u2y;
-
-                for (int ii = 0; ii<3; ii++) {cx[ii] = 0.0;}
-                for (int ii = 0; ii<3; ii++) {cy[ii] = 0.0;}
-    
-                // 3x3 Legendre coefficent matrix A
-                const Real A[3][3] = {
-                  {3.0/8.0,     1.0/4.0,      3.0/8.0},
-                  {-3.0/4.0,    0.0,          3.0/4.0},
-                  {3.0/4.0,     -3.0/2.0,     3.0/4.0}
-                };
-                // A * u = c
-                for (int row = 0; row < 3; ++row) {
-                  for (int col = 0; col < 3; ++col) {
-                    cx[row] += A[row][col] * ux[col];
-                    cy[row] += A[row][col] * uy[col];
-                  }
-                }
-                // compute (c_N)^2 and sum_0^N((c_n)^2)... see equation (9) in Deppe 2023
-                Real kappa3x = 0.0;
-                Real kappa3y = 0.0;
-                for (int jj = 0; jj < 3; ++jj) {
-                  kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
-                  kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
-                }
-                Real kappa3x_hat = cx[2] * cx[2] / 5.0;
-                Real kappa3y_hat = cy[2] * cy[2] / 5.0;
-                Real kappa3 = fmax(kappa3x, kappa3y);
-                Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
-                // extract kappa3_hat and kappa3 from parallel reduction
-                max_cN = fmax(kappa3_hat, max_cN);
-                max_sum_cN = fmax(kappa3, max_sum_cN);
-              }
-              if (stencil == 5) {
-                Real u2, u0x, u1x, u3x, u4x, u0y, u1y, u3y, u4y;
-                if (variable == 1) {
-                  u2 = w0(m, IDN, k, j, i);
-
-                  u0x = w0(m, IDN, k, j, i - 2);
-                  u1x = w0(m, IDN, k, j, i - 1);
-                  u3x = w0(m, IDN, k, j, i + 1);
-                  u4x = w0(m, IDN, k, j, i + 2);
-
-                  u0y = w0(m, IDN, k, j - 2, i);
-                  u1y = w0(m, IDN, k, j - 1, i);
-                  u3y = w0(m, IDN, k, j + 1, i);
-                  u4y = w0(m, IDN, k, j + 2, i);
-                }
-                if (variable == 2) {
-                  u2 = std::sqrt(SQR(w0(m, IVX, k, j, i)) + SQR(w0(m, IVY, k, j, i)));
-
-                  u0x = std::sqrt(SQR(w0(m, IVX, k, j, i - 2)) + SQR(w0(m, IVY, k, j, i - 2)));
-                  u1x = std::sqrt(SQR(w0(m, IVX, k, j, i - 1)) + SQR(w0(m, IVY, k, j, i - 1)));
-                  u3x = std::sqrt(SQR(w0(m, IVX, k, j, i + 1)) + SQR(w0(m, IVY, k, j, i + 1)));
-                  u4x = std::sqrt(SQR(w0(m, IVX, k, j, i + 2)) + SQR(w0(m, IVY, k, j, i + 2)));
-
-                  u0y = std::sqrt(SQR(w0(m, IVX, k, j - 2, i)) + SQR(w0(m, IVY, k, j - 2,i)));
-                  u1y = std::sqrt(SQR(w0(m, IVX, k,j - 1,i)) + SQR(w0(m, IVY,k,j - 1,i)));
-                  u3y = std::sqrt(SQR(w0(m, IVX,k,j + 1,i)) + SQR(w0(m, IVY,k,j + 1,i)));
-                  u4y = std::sqrt(SQR(w0(m, IVX,k,j + 2,i)) + SQR(w0(m, IVY,k,j + 2,i)));
-                }
-
-                Real ux[5], uy[5], cx[5], cy[5]; 
-                ux[0] = u0x; ux[1] = u1x; ux[2] = u2; ux[3] = u3x; ux[4] = u4x;
-                uy[0] = u0y; uy[1] = u1y; uy[2] = u2; uy[3] = u3y; uy[4] = u4y;
-
-                for (int kk = 0; kk<5; kk++) {cx[kk] = 0.0;}
-                for (int kk = 0; kk<5; kk++) {cy[kk] = 0.0;}
-
-                const Real A[5][5] = {
-                    {275.0/115.0,     25.0/288.0,     67.0/192.0,     25.0/288.0,     275.0/1152.0},
-                    {-55.0/96.0,      -5.0/48.0,      0.0,            5.0/48.0,       55.0/96.0},
-                    {1525.0/2016.0,   -475.0/504.0,   125.0/336.0,    -475.0/504.0,   1525.0/2016.0},
-                    {-25.0/48.0,      25.0/24.0,      0.0,           -25.0/24.0,      25.0/48.0},
-                    {125.0/336.0,     -125.0/84.0,    125.0/56.0,     -125.0/84.0,    125.0/336.0}
-                };
-
-                for (int row = 0; row < 5; ++row) {
-                  for (int col = 0; col < 5; ++col) {
-                    cx[row] += A[row][col] * ux[col];
-                    cy[row] += A[row][col] * uy[col];
-                  }
-                }
-
-                Real kappa3x = 0.0;
-                Real kappa3y = 0.0;
-                for (int jj = 0; jj < 5; ++jj) {
-                  kappa3x += cx[jj] * cx[jj] / (2.0 * jj + 1);
-                  kappa3y += cy[jj] * cy[jj] / (2.0 * jj + 1);
-                }
-                Real kappa3x_hat = cx[4] * cx[4] / 9.0;
-                Real kappa3y_hat = cy[4] * cy[4] / 9.0;
-
-                Real kappa3 = fmax(kappa3x, kappa3y);
-                Real kappa3_hat = fmax(kappa3x_hat, kappa3y_hat);
-
-                max_cN = fmax(kappa3_hat, max_cN);
-                max_sum_cN = fmax(kappa3, max_sum_cN);
-              }
-            // Kokkos::Max finds the maximum values over the entire meshblock
-            }, Kokkos::Max<Real>(cN), Kokkos::Max<Real>(sum_cN));
-          
-            // check if the Nth degree power exceeds the sum of powers
-          if (stencil == 3) {
-            Real N = 2.0;
-            Real threshold_refine = pow(N, 2.0 * alpha_refine);
-            Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen);
-
-            if (cN * threshold_refine > sum_cN) {
-              refine_flag_.d_view(m + mbs) = 1;
-            }
-            if (cN * threshold_coarsen < sum_cN) {
-              refine_flag_.d_view(m + mbs) = -1;
-            }
-          }
-          if (stencil == 5) {
-            Real N = 4.0;
-            Real threshold_refine = pow(N, 2.0 * alpha_refine);
-            Real threshold_coarsen = pow(N, 2.0 * alpha_coarsen);
-
-            if (cN * threshold_refine > sum_cN) {
-              refine_flag_.d_view(m + mbs) = 1;
-            }
-            if (cN * threshold_coarsen < sum_cN) {
-              refine_flag_.d_view(m + mbs) = -1;
-            }
-          }
-        }
-
-        // custom AMR criteria for high-order derivitive with defined threshold values 
-        if (refine_threshold != 0.0 && coarsen_threshold != 0.0) {
-          // loop over all of the cells in the MeshBlock in parallel
-          Real team_deriv_max;
-
-          // second derivitive of momentum magnitude
-          auto mom_mag_1d = [&](int kk, int jj, int ii) -> Real {
-            Real mx = w0(m, IM1, kk, jj, ii);
-            return std::sqrt(mx*mx);
-          };
-          auto mom_mag_2d = [&](int kk, int jj, int ii) -> Real {
-            Real mx = w0(m, IM1, kk, jj, ii);
-            Real my = w0(m, IM2, kk, jj, ii);
-            return std::sqrt(mx*mx + my*my);
-          };
-          // second derivitive of momentum magnitude
-          auto mom_mag_3d = [&](int kk, int jj, int ii) -> Real {
-            Real mx = w0(m, IM1, kk, jj, ii);
-            Real my = w0(m, IM2, kk, jj, ii);
-            Real mz = w0(m, IM3, kk, jj, ii);
-            return std::sqrt(mx*mx + my*my + mz*mz);
-          };
-          // function to compute the sigma hot
-          auto sigmah_rel = [&](int kk, int jj, int ii) -> Real {
-              Real Bx = w0(m, IBX, kk, jj, ii);
-              Real By = w0(m, IBY, kk, jj, ii);
-              Real Bz = w0(m, IBZ, kk, jj, ii);
-              Real B2 = SQR(Bx) + SQR(By) + SQR(Bz);
-
-              Real rho = w0(m, IDN, kk, jj, ii);
-              Real di  = 1.0 / rho;
-
-              Real mx = w0(m, IM1, kk, jj, ii);
-              Real my = w0(m, IM2, kk, jj, ii);
-              Real mz = w0(m, IM3, kk, jj, ii);
-              Real e_k = 0.5 * di * (SQR(mx) + SQR(my) + SQR(mz));
-
-              Real e_m = 0.5 * B2;
-              Real u_gas = w0(m, IEN, kk, jj, ii) - e_k - e_m;
-
-              Real p_gas = w0(m, IPR, kk, jj, ii);
-
-              return B2 / (rho + u_gas + p_gas);
-          };
-
-          Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
-            [=](const int idx, Real& deriv_max) {
-              int k = (idx) / nji;
-              int j = (idx - k * nji) / nx1;
-              int i = (idx - k * nji - j * nx1) + is;
-              j += js;
-              k += ks;
-              const bool one_d = !multi_d;
-              const bool two_d = multi_d && ! three_d;
-
-              if (one_d) {
-                if (stencil == 3) {
-                  if (variable == 3) {
-                    // second derivitive of density
-                    Real rho1 = w0(m, IDN, k, j, i);
-                    Real rho0x = w0(m, IDN, k, j, i - 1);
-                    Real rho2x = w0(m, IDN, k, j, i + 1);
-
-                    Real ddrho_x = rho2x - 2.0 * rho1 + rho0x;
-                    
-                    Real rho_error = fabs(ddrho_x) / (rho1 + 1e-15);
-
-                    Real mom1  = mom_mag_1d(k, j, i);
-                    Real mom0x = mom_mag_1d(k, j, i - 1);
-                    Real mom2x = mom_mag_1d(k, j, i + 1); 
-
-                    Real ddmom_x = mom2x - 2.0 * mom1 + mom0x;
-
-                    Real mom_error = fabs(ddmom_x) / (mom1 + 1e-15);
-
-                    // second derivitive of evolved energy
-                    Real ene1 = w0(m, IEN, k, j, i);
-                    Real ene0x = w0(m, IEN, k, j, i - 1);
-                    Real ene2x = w0(m, IEN, k, j, i + 1);
-
-                    Real ddene_x = ene2x - 2.0 * ene1 + ene0x;
-
-                    Real ene_error = fabs(ddene_x) / (ene1 + 1e-15);
-
-                    // maximum of density, momentum and evolved energy errors
-                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
-                    deriv_max = fmax(local_error, deriv_max);
-                  }
-                }
-                if (stencil == 5) {
-                  if (variable == 3) {
-                    // fourth derivitive of density
-                    Real rho2 = w0(m, IDN, k, j, i);
-                    Real rho0x = w0(m, IDN, k, j, i - 2);
-                    Real rho1x = w0(m, IDN, k, j, i - 1);
-                    Real rho3x = w0(m, IDN, k, j, i + 1);
-                    Real rho4x = w0(m, IDN, k, j, i + 2);
-
-                    Real ddddrho_x = rho4x - 4.0 * rho3x + 6.0 * rho2 - 4.0 * rho1x + rho0x;
-
-                    Real rho_error = fabs(ddddrho_x) / (rho2 + 1e-15);
-
-                    Real mom2  = mom_mag_1d(k, j, i);
-                    Real mom0x = mom_mag_1d(k, j, i - 2);
-                    Real mom1x = mom_mag_1d(k, j, i - 1);
-                    Real mom3x = mom_mag_1d(k, j, i + 1);
-                    Real mom4x = mom_mag_1d(k, j, i + 2);
-
-                    Real ddddmom_x = mom4x - 4.0 * mom3x + 6.0 * mom2 - 4.0 * mom1x + mom0x;
-
-                    Real mom_error = fabs(ddddmom_x) / (mom2 + 1e-15);
-
-                    // fourth derivitive of evolve energy
-                    Real ene2 = w0(m, IEN, k, j, i);
-                    Real ene0x = w0(m, IEN, k, j, i - 2);
-                    Real ene1x = w0(m, IEN, k, j, i - 1);
-                    Real ene3x = w0(m, IEN, k, j, i + 1);
-                    Real ene4x = w0(m, IEN, k, j, i + 2);
-
-                    Real ddddene_x = ene4x - 4.0 * ene3x + 6.0 * ene2 - 4.0 * ene1x + ene0x;
-
-                    Real ene_error = fabs(ddddene_x) / (ene2 + 1e-15);
-
-                    // maximum of density, momentum and evolved energy errors
-                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
-                    deriv_max = fmax(local_error, deriv_max);
-                  }
-                }
-              } 
-              else if (two_d) {
-                if (stencil == 3) {
-                  if (variable == 3) {
-                    // second derivitive of density
-                    Real rho1 = w0(m, IDN, k, j, i);
-                    Real rho0x = w0(m, IDN, k, j, i - 1);
-                    Real rho2x = w0(m, IDN, k, j, i + 1);
-                    Real rho0y = w0(m, IDN, k, j - 1, i);
-                    Real rho2y = w0(m, IDN, k, j + 1, i);
-
-                    Real ddrho_x = rho2x - 2.0 * rho1 + rho0x;
-                    Real ddrho_y = rho2y - 2.0 * rho1 + rho0y;
-                    
-                    Real rho_error = fmax(fabs(ddrho_x), fabs(ddrho_y)) / (rho1 + 1e-15);
-
-                    Real mom1  = mom_mag_2d(k, j, i);
-                    Real mom0x = mom_mag_2d(k, j, i - 1);
-                    Real mom2x = mom_mag_2d(k, j, i + 1); 
-                    Real mom0y = mom_mag_2d(k, j - 1, i);
-                    Real mom2y = mom_mag_2d(k, j + 1, i);
-
-                    Real ddmom_x = mom2x - 2.0 * mom1 + mom0x;
-                    Real ddmom_y = mom2y - 2.0 * mom1 + mom0y;
-
-                    Real mom_error = fmax(fabs(ddmom_x), fabs(ddmom_y)) / (mom1 + 1e-15);
-
-                    // second derivitive of evolved energy
-                    Real ene1 = w0(m, IEN, k, j, i);
-                    Real ene0x = w0(m, IEN, k, j, i - 1);
-                    Real ene2x = w0(m, IEN, k, j, i + 1);
-                    Real ene0y = w0(m, IEN, k, j - 1, i);
-                    Real ene2y = w0(m, IEN, k, j + 1, i);
-
-                    Real ddene_x = ene2x - 2.0 * ene1 + ene0x;
-                    Real ddene_y = ene2y - 2.0 * ene1 + ene0y;
-
-                    Real ene_error = fmax(fabs(ddene_x), fabs(ddene_y)) / (ene1 + 1e-15);
-
-                    // maximum of density, momentum and evolved energy errors
-                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
-                    deriv_max = fmax(local_error, deriv_max);
-                  }
-                }
-                if (stencil == 5) {
-                  if (variable == 3) {
-                    // fourth derivitive of density
-                    Real rho2 = w0(m, IDN, k, j, i);
-                    Real rho0x = w0(m, IDN, k, j, i - 2);
-                    Real rho1x = w0(m, IDN, k, j, i - 1);
-                    Real rho3x = w0(m, IDN, k, j, i + 1);
-                    Real rho4x = w0(m, IDN, k, j, i + 2);
-                    Real rho0y = w0(m, IDN, k, j - 2, i);
-                    Real rho1y = w0(m, IDN, k, j - 1, i);
-                    Real rho3y = w0(m, IDN, k, j + 1, i);
-                    Real rho4y = w0(m, IDN, k, j + 2, i);
-
-                    Real ddddrho_x = rho4x - 4.0 * rho3x + 6.0 * rho2 - 4.0 * rho1x + rho0x;
-                    Real ddddrho_y = rho4y - 4.0 * rho3y + 6.0 * rho2 - 4.0 * rho1y + rho0y;
-
-                    Real rho_error = fmax(fabs(ddddrho_x), fabs(ddddrho_y)) / (rho2 + 1e-15);
-
-                    Real mom2  = mom_mag_2d(k, j, i);
-                    Real mom0x = mom_mag_2d(k, j, i - 2);
-                    Real mom1x = mom_mag_2d(k, j, i - 1);
-                    Real mom3x = mom_mag_2d(k, j, i + 1);
-                    Real mom4x = mom_mag_2d(k, j, i + 2);
-                    Real mom0y = mom_mag_2d(k, j - 2, i);
-                    Real mom1y = mom_mag_2d(k, j - 1, i);
-                    Real mom3y = mom_mag_2d(k, j + 1, i);
-                    Real mom4y = mom_mag_2d(k, j + 2, i);
-
-                    Real ddddmom_x = mom4x - 4.0 * mom3x + 6.0 * mom2 - 4.0 * mom1x + mom0x;
-                    Real ddddmom_y = mom4y - 4.0 * mom3y + 6.0 * mom2 - 4.0 * mom1y + mom0y;
-
-                    Real mom_error = fmax(fabs(ddddmom_x), fabs(ddddmom_y)) / (mom2 + 1e-15);
-
-                    // fourth derivitive of evolve energy
-                    Real ene2 = w0(m, IEN, k, j, i);
-                    Real ene0x = w0(m, IEN, k, j, i - 2);
-                    Real ene1x = w0(m, IEN, k, j, i - 1);
-                    Real ene3x = w0(m, IEN, k, j, i + 1);
-                    Real ene4x = w0(m, IEN, k, j, i + 2);
-                    Real ene0y = w0(m, IEN, k, j - 2, i);
-                    Real ene1y = w0(m, IEN, k, j - 1, i);
-                    Real ene3y = w0(m, IEN, k, j + 1, i);
-                    Real ene4y = w0(m, IEN, k, j + 2, i);
-
-                    Real ddddene_x = ene4x - 4.0 * ene3x + 6.0 * ene2 - 4.0 * ene1x + ene0x;
-                    Real ddddene_y = ene4y - 4.0 * ene3y + 6.0 * ene2 - 4.0 * ene1y + ene0y;
-
-                    Real ene_error = fmax(fabs(ddddene_x), fabs(ddddene_y)) / (ene2 + 1e-15);
-
-                    // maximum of density, momentum and evolved energy errors
-                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
-                    deriv_max = fmax(local_error, deriv_max);
-                  }
-                } 
-              }             
-              else {
-                if (stencil == 3) {
-                  if (variable == 3) {
-                    // second derivitive of density
-                    Real rho1 = w0(m, IDN, k, j, i);
-                    Real rho0x = w0(m, IDN, k, j, i - 1);
-                    Real rho2x = w0(m, IDN, k, j, i + 1);
-                    Real rho0y = w0(m, IDN, k, j - 1, i);
-                    Real rho2y = w0(m, IDN, k, j + 1, i);
-                    Real rho2z = w0(m, IDN, k + 1, j, i);
-                    Real rho0z = w0(m, IDN, k - 1, j, i);
-
-                    Real ddrho_x = rho2x - 2.0 * rho1 + rho0x;
-                    Real ddrho_y = rho2y - 2.0 * rho1 + rho0y;
-                    Real ddrho_z = rho2z - 2.0 * rho1 + rho0z;
-                    
-                    Real rho_error = fmax(fabs(ddrho_x), fmax(fabs(ddrho_y), fabs(ddrho_z))) / (rho1 + 1e-15);
-
-                    Real mom1  = mom_mag_3d(k, j, i);
-                    Real mom0x = mom_mag_3d(k, j, i - 1);
-                    Real mom2x = mom_mag_3d(k, j, i + 1); 
-                    Real mom0y = mom_mag_3d(k, j - 1, i);
-                    Real mom2y = mom_mag_3d(k, j + 1, i);
-                    Real mom0z = mom_mag_3d(k - 1, j, i);
-                    Real mom2z = mom_mag_3d(k + 1, j, i);
-
-                    Real ddmom_x = mom2x - 2.0 * mom1 + mom0x;
-                    Real ddmom_y = mom2y - 2.0 * mom1 + mom0y;
-                    Real ddmom_z = mom2z - 2.0 * mom1 + mom0z;
-
-                    Real mom_error = fmax(fabs(ddmom_x), fmax(fabs(ddmom_y), fabs(ddmom_z))) / (mom1 + 1e-15);
-
-                    // second derivitive of evolved energy
-                    Real ene1 = w0(m, IEN, k, j, i);
-                    Real ene0x = w0(m, IEN, k, j, i - 1);
-                    Real ene2x = w0(m, IEN, k, j, i + 1);
-                    Real ene0y = w0(m, IEN, k, j - 1, i);
-                    Real ene2y = w0(m, IEN, k, j + 1, i);
-                    Real ene0z = w0(m, IEN, k - 1, j, i);
-                    Real ene2z = w0(m, IEN, k + 1, j, i);
-
-                    Real ddene_x = ene2x - 2.0 * ene1 + ene0x;
-                    Real ddene_y = ene2y - 2.0 * ene1 + ene0y;
-                    Real ddene_z = ene2z - 2.0 * ene1 + ene0z;
-
-                    Real ene_error = fmax(fabs(ddene_x), fmax(fabs(ddene_y), fabs(ddene_z))) / (ene1 + 1e-15);
-
-                    // maximum of density, momentum and evolved energy errors
-                    Real local_error = fmax(rho_error, fmax(mom_error, ene_error));
-                    deriv_max = fmax(local_error, deriv_max);
-                  }
-                }
-                if (stencil == 5) {
-                  if (variable == 3) {
-                    // fourth derivitive of density
-                    Real rho2 = w0(m, IDN, k, j, i);
-                    Real rho0x = w0(m, IDN, k, j, i - 2);
-                    Real rho1x = w0(m, IDN, k, j, i - 1);
-                    Real rho3x = w0(m, IDN, k, j, i + 1);
-                    Real rho4x = w0(m, IDN, k, j, i + 2);
-                    Real rho0y = w0(m, IDN, k, j - 2, i);
-                    Real rho1y = w0(m, IDN, k, j - 1, i);
-                    Real rho3y = w0(m, IDN, k, j + 1, i);
-                    Real rho4y = w0(m, IDN, k, j + 2, i);
-                    Real rho0z = w0(m, IDN, k-2, j, i);
-                    Real rho1z = w0(m, IDN, k-1, j, i);
-                    Real rho3z = w0(m, IDN, k+1, j, i);
-                    Real rho4z = w0(m, IDN, k+2, j, i);
-
-                    Real ddddrho_x = rho4x - 4.0 * rho3x + 6.0 * rho2 - 4.0 * rho1x + rho0x;
-                    Real ddddrho_y = rho4y - 4.0 * rho3y + 6.0 * rho2 - 4.0 * rho1y + rho0y;
-                    Real ddddrho_z = rho4z - 4.0 * rho3z + 6.0 * rho2 - 4.0 * rho1z + rho0z;
-
-                    Real rho_error = fmax(fabs(ddddrho_x), fmax(fabs(ddddrho_y), fabs(ddddrho_z))) / (rho2 + 1e-15);
-
-                    // fourth derivitive of momentum magnitude
-                    Real mom2  = mom_mag_3d(k, j, i);
-                    Real mom0x = mom_mag_3d(k, j, i - 2);
-                    Real mom1x = mom_mag_3d(k, j, i - 1);
-                    Real mom3x = mom_mag_3d(k, j, i + 1);
-                    Real mom4x = mom_mag_3d(k, j, i + 2);
-                    Real mom0y = mom_mag_3d(k, j - 2, i);
-                    Real mom1y = mom_mag_3d(k, j - 1, i);
-                    Real mom3y = mom_mag_3d(k, j + 1, i);
-                    Real mom4y = mom_mag_3d(k, j + 2, i);
-                    Real mom0z = mom_mag_3d(k - 2, j, i);
-                    Real mom1z = mom_mag_3d(k - 1, j, i);
-                    Real mom3z = mom_mag_3d(k + 1, j, i);
-                    Real mom4z = mom_mag_3d(k + 2, j, i);
-
-                    Real ddddmom_x = mom4x - 4.0 * mom3x + 6.0 * mom2 - 4.0 * mom1x + mom0x;
-                    Real ddddmom_y = mom4y - 4.0 * mom3y + 6.0 * mom2 - 4.0 * mom1y + mom0y;
-                    Real ddddmom_z = mom4z - 4.0 * mom3z + 6.0 * mom2 - 4.0 * mom1z + mom0z;
-
-                    Real mom_error = fmax(fabs(ddddmom_x), fmax(fabs(ddddmom_y), fabs(ddddmom_z))) / (mom2 + 1e-15);
-
-                    // fourth derivitive of evolve energy
-                    Real ene2 = w0(m, IEN, k, j, i);
-                    Real ene0x = w0(m, IEN, k, j, i - 2);
-                    Real ene1x = w0(m, IEN, k, j, i - 1);
-                    Real ene3x = w0(m, IEN, k, j, i + 1);
-                    Real ene4x = w0(m, IEN, k, j, i + 2);
-                    Real ene0y = w0(m, IEN, k, j - 2, i);
-                    Real ene1y = w0(m, IEN, k, j - 1, i);
-                    Real ene3y = w0(m, IEN, k, j + 1, i);
-                    Real ene4y = w0(m, IEN, k, j + 2, i);
-                    Real ene0z = w0(m, IEN, k - 2, j, i);
-                    Real ene1z = w0(m, IEN, k - 1, j, i);
-                    Real ene3z = w0(m, IEN, k + 1, j, i);
-                    Real ene4z = w0(m, IEN, k + 2, j, i);
-
-                    Real ddddene_x = ene4x - 4.0 * ene3x + 6.0 * ene2 - 4.0 * ene1x + ene0x;
-                    Real ddddene_y = ene4y - 4.0 * ene3y + 6.0 * ene2 - 4.0 * ene1y + ene0y;
-                    Real ddddene_z = ene4z - 4.0 * ene3z + 6.0 * ene2 - 4.0 * ene1z + ene0z;
-
-                    Real ene_error = fmax(fabs(ddddene_x), fmax(fabs(ddddene_y), fabs(ddddene_z))) / (ene2 + 1e-15);
-                    
-                    // fourth derivitive of sigma hot
-                    Real sigmah2 = sigmah_rel(k, j, i);
-                    Real sigmah0x = sigmah_rel(k, j, i - 2);
-                    Real sigmah1x = sigmah_rel(k, j, i - 1);
-                    Real sigmah3x = sigmah_rel(k, j, i + 1);
-                    Real sigmah4x = sigmah_rel(k, j, i + 2);
-                    Real sigmah0y = sigmah_rel(k, j - 2, i);
-                    Real sigmah1y = sigmah_rel(k, j - 1, i);
-                    Real sigmah3y = sigmah_rel(k, j + 1, i);
-                    Real sigmah4y = sigmah_rel(k, j + 2, i);
-                    Real sigmah0z = sigmah_rel(k - 2, j, i);
-                    Real sigmah1z = sigmah_rel(k - 1, j, i);
-                    Real sigmah3z = sigmah_rel(k + 1, j, i);
-                    Real sigmah4z = sigmah_rel(k + 2, j, i);  
-
-                    Real ddddsigmah_x = sigmah4x - 4.0 * sigmah3x + 6.0 * sigmah2 - 4.0 * sigmah1x + sigmah0x;
-                    Real ddddsigmah_y = sigmah4y - 4.0 * sigmah3y + 6.0 * sigmah2 - 4.0 * sigmah1y + sigmah0y;
-                    Real ddddsigmah_z = sigmah4z - 4.0 * sigmah3z + 6.0 * sigmah2 - 4.0 * sigmah1z + sigmah0z;
-
-                    Real sigmah_error = fmax(fabs(ddddsigmah_x), fmax(fabs(ddddsigmah_y), fabs(ddddsigmah_z))) / (sigmah2 + 1e-15);
-
-
-                    // maximum of density, momentum errors, energy and sigma hot errors
-                    Real local_error = fmax(rho_error, fmax(mom_error, fmax(sigmah_error, ene_error)));
-                    deriv_max = fmax(local_error, deriv_max);
-                  }
-                }
-              }
-            }, Kokkos::Max<Real>(team_deriv_max));
-
-          if (team_deriv_max > refine_threshold) { refine_flag_.d_view(m + mbs) = 1; }
-          if (team_deriv_max < coarsen_threshold) { refine_flag_.d_view(m + mbs) = -1; }
-        }
-      } 
-    );
-  }
-  // ---------------------------------------------------------------------------
-  // Check (on device) user-defined refinement condition(s), if any
-  if (pmy_mesh->pgen->user_ref_func != nullptr) {
-    pmy_mesh->pgen->user_ref_func(pmbp);
-  }
-  // sync device array with host
-  refine_flag.template modify<DevExeSpace>();
-  refine_flag.template sync<HostMemSpace>();
-
-  // Check (on host) for MeshBlocks at max/root level flagged for refine/derefine
   for (int m=0; m<nmb; ++m) {
     if (pmy_mesh->lloc_eachmb[m+mbs].level == pmy_mesh->max_level) {
       if (refine_flag.h_view(m+mbs) > 0) {refine_flag.h_view(m+mbs) = 0;}
@@ -918,13 +207,13 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
       if (refine_flag.h_view(m+mbs) < 0) {refine_flag.h_view(m+mbs) = 0;}
     }
   }
-
-  // Check (on host) that MB has not been recently refined
+  // Turn off (on host) refine/derefine flag for any MB that has been recently refined
   for (int m=0; m<nmb; ++m) {
     if (ncyc_since_ref(m+mbs) < refinement_interval) {refine_flag.h_view(m+mbs) = 0;}
   }
+
 #if MPI_PARALLEL_ENABLED
-  // Pass refine_flag between all ranks
+  // Pass (host) refine_flag between all ranks
     MPI_Allgatherv(MPI_IN_PLACE, pmy_mesh->nmb_eachrank[global_variable::my_rank],
                    MPI_INT, refine_flag.h_view.data(), pmy_mesh->nmb_eachrank,
                    pmy_mesh->gids_eachrank, MPI_INT, MPI_COMM_WORLD);
@@ -932,7 +221,6 @@ void MeshRefinement::CheckForRefinement(MeshBlockPack* pmbp) {
   // sync host array with device
   refine_flag.template modify<HostMemSpace>();
   refine_flag.template sync<DevExeSpace>();
-
   return;
 }
 
@@ -1197,6 +485,7 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   // array in target MB.
   hydro::Hydro* phydro = pm->pmb_pack->phydro;
   mhd::MHD* pmhd = pm->pmb_pack->pmhd;
+  radiation::Radiation* prad = pm->pmb_pack->prad;
   z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   adm::ADM* padm = pm->pmb_pack->padm;
   // derefine (if needed)
@@ -1207,6 +496,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     if (pmhd != nullptr) {
       DerefineCCSameRank(pmhd->u0, pmhd->coarse_u0);
       DerefineFCSameRank(pmhd->b0, pmhd->coarse_b0);
+    }
+    if (prad != nullptr) {
+      DerefineCCSameRank(prad->i0, prad->coarse_i0);
     }
     if (pz4c != nullptr) {
       DerefineCCSameRank(pz4c->u0, pz4c->coarse_u0);
@@ -1223,6 +515,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     CopyCC(pmhd->u0);
     CopyFC(pmhd->b0);
   }
+  if (prad != nullptr) {
+    CopyCC(prad->i0);
+  }
   if (pz4c != nullptr) {
     CopyCC(pz4c->u0);
   } else if (padm != nullptr) {
@@ -1238,6 +533,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     if (pmhd != nullptr) {
       CopyForRefinementCC(pmhd->u0, pmhd->coarse_u0);
       CopyForRefinementFC(pmhd->b0, pmhd->coarse_b0);
+    }
+    if (prad != nullptr) {
+      CopyForRefinementCC(prad->i0, prad->coarse_i0);
     }
     if (pz4c != nullptr) {
       CopyForRefinementCC(pz4c->u0, pz4c->coarse_u0);
@@ -1271,11 +569,16 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
       RefineCC(new_to_old, pmhd->u0, pmhd->coarse_u0);
       RefineFC(new_to_old, pmhd->b0, pmhd->coarse_b0);
     }
+    if (prad != nullptr) {
+      RefineCC(new_to_old, prad->i0, prad->coarse_i0);
+    }
     if (pz4c != nullptr) {
       RefineCC(new_to_old, pz4c->u0, pz4c->coarse_u0, true);
     }
   }
 
+  // Step 10.
+  // General housekeeping
   // Update new number of cycles since refinement
   HostArray1D<int> new_ncyc_since_ref("nnref",new_nmb_total);
   for (int m=0; m<(new_nmb_total); ++m) {
@@ -1289,7 +592,6 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   Kokkos::realloc(ncyc_since_ref, new_nmb_total);
   Kokkos::deep_copy(ncyc_since_ref, new_ncyc_since_ref);
 
-  // Step 10.
   // Update data in Mesh/MeshBlockPack/MeshBlock classes with new grid properties
   delete [] pm->lloc_eachmb;
   delete [] pm->rank_eachmb;
@@ -1308,20 +610,28 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   pm->pmb_pack->gide = pm->pmb_pack->gids + pm->nmb_eachrank[global_variable::my_rank]-1;
   pm->pmb_pack->nmb_thispack = pm->pmb_pack->gide - pm->pmb_pack->gids + 1;
 
+  // Delete old then allocate new MeshBlocks and Coordinates (latter includes masks in GR)
   delete (pm->pmb_pack->pmb);
   delete (pm->pmb_pack->pcoord);
   pm->pmb_pack->AddMeshBlocks(pin);
   pm->pmb_pack->AddCoordinates(pin);
   pm->pmb_pack->pmb->SetNeighbors(pm->ptree, pm->rank_eachmb);
 
-  // clean-up and return
+  // clean-up
   delete [] newtoold;
   delete [] oldtonew;
 
   // Step 11.
-  // Recalculate ADM variables if necessary.
-  if ((pz4c == nullptr) && (padm != nullptr) && (nnew > 0 || ndel > 0)) {
-    padm->SetADMVariables(pm->pmb_pack);
+  // Initialize quantities stored on the mesh associated with each physics, if necessary
+  if ((nnew > 0) || (ndel > 0)) {
+    // With dynGRMHD, recalculate ADM variables
+    if ((pz4c == nullptr) && (padm != nullptr)) {
+      padm->SetADMVariables(pm->pmb_pack);
+    }
+    // With radiation, compute tetrads and associated mesh arrays
+    if (prad != nullptr) {
+      prad->SetOrthonormalTetrad();
+    }
   }
 
   return;
