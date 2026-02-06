@@ -459,8 +459,6 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
   const bool monitor_magnetic_field =
       crit.monitor_magnetic_field && (pmbp->pmhd != nullptr);
 
-  auto &bcc = pmbp->pmhd->bcc0; // cell-centered magnetic field
-
   par_for_outer(
       "SpectralNorm", DevExeSpace(), 0, 0, 0, (nmb - 1),
       KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
@@ -720,6 +718,7 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
         // Spectral norm method: check the magnitude of B field
         
         if (monitor_magnetic_field) {
+          auto &bcc = pmbp->pmhd->bcc0; // cell-centered magnetic field
           Kokkos::parallel_reduce(
               Kokkos::TeamThreadRange(tmember, nkji),
               [=](const int idx, Real &max_error) {
