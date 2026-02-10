@@ -1,0 +1,101 @@
+# Athena++ (Kokkos version) input file for hydro KH test
+
+<comment>
+problem   = Kelvin-Helmholtz instability
+reference = Lecoanet et al.
+
+<job>
+basename  = khi         # problem ID: basename of output filenames
+
+<mesh>
+nghost    = 4
+
+nx1       = 64        # Number of zones in X1-direction
+x1min     = -0.5        # minimum value of X1
+x1max     =  0.5        # maximum value of X1
+ix1_bc    = periodic    # inner-X1 boundary flag
+ox1_bc    = periodic    # inner-X1 boundary flag
+
+nx2       = 64       # Number of zones in X2-direction
+x2min     = 0.0        # minimum value of X2
+x2max     = 1.0        # maximum value of X2
+ix2_bc    = reflect    # inner-X2 boundary flag
+ox2_bc    = reflect    # inner-X2 boundary flag
+
+nx3       = 1           # Number of zones in X3-direction
+x3min     = -0.5        # minimum value of X3
+x3max     = 0.5         # maximum value of X3
+ix3_bc    = periodic    # inner-X3 boundary flag
+ox3_bc    = periodic    # inner-X3 boundary flag
+
+<meshblock>
+nx1       = 16        # Number of cells in each MeshBlock, X1-dir
+nx2       = 16        # Number of cells in each MeshBlock, X2-dir
+nx3       = 1           # Number of cells in each MeshBlock, X3-dir
+
+
+<mesh_refinement>
+refinement = adaptive
+num_levels = 4
+refinement_interval = 10
+max_nmb_per_rank = 4096
+
+<amr_criterion0>
+method = spectral_norm
+use_sum_for_error_policy = false
+variable = hydro_w_d
+alpha_refine = 1.0
+alpha_coarsen = 2.0
+dfloor = 1.0e-10
+efloor = 1.0e-10
+monitor_momentum = false
+monitor_energy = true
+use_primitives = false
+monitor_magnetic_field = false
+
+
+<refined_region0>
+level = 1
+x1min = -0.5
+x1max = 0.5
+x2min = 0.375
+x2max = 0.625
+
+<refined_region1>
+level = 2
+x1min = -0.5
+x1max = 0.5
+x2min = 0.4375
+x2max = 0.5625
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4        # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1         # cycle limit
+tlim       = 2.0        # time limit
+ndiag      = 100        # cycles between diagostic output
+
+<hydro>
+eos         = ideal     # EOS type
+reconstruct = plm       # spatial reconstruction method
+rsolver     = hllc      # Riemann-solver to be used
+nscalars    = 1         # number of passive scalars in hydro
+gamma       = 1.666667  # gamma = C_p/C_v
+
+<problem>
+iprob = 4               # flag to select test
+amp   = 0.03            # amplitude of sinusoidal perturbation
+sigma = 0.2             # width of tanh profile
+vshear = 1.0            # shear velocity
+drho_rho0 = 1.0         # stratified or unstratified problem (delta rho / rho0)
+
+<output1>
+file_type  = hst       # History data dump
+dt         = 0.1       # time increment between outputs
+
+<output2>
+file_type  = bin       # Binary data dump
+variable   = hydro_w   # variables to be output
+dt         = 0.1       # time increment between outputs
+# dcycle = 10
