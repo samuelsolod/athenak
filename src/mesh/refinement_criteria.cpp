@@ -439,6 +439,8 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
   // capture evolved/primitive variables
   auto &u0 = (pmbp->phydro != nullptr) ? pmbp->phydro->u0 : pmbp->pmhd->u0;
   auto &w0 = (pmbp->phydro != nullptr) ? pmbp->phydro->w0 : pmbp->pmhd->w0;
+  auto &bcc = pmbp->pmhd->bcc0; // cell-centered magnetic field
+
 
   auto &var = crit.use_primitives ? w0 : u0;
 
@@ -718,7 +720,6 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
         // Spectral norm method: check the magnitude of B field
         
         if (monitor_magnetic_field) {
-          auto &bcc = pmbp->pmhd->bcc0; // cell-centered magnetic field
           Kokkos::parallel_reduce(
               Kokkos::TeamThreadRange(tmember, nkji),
               [=](const int idx, Real &max_error) {
