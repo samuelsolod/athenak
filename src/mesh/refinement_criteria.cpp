@@ -464,357 +464,130 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
   par_for_outer(
       "SpectralNorm", DevExeSpace(), 0, 0, 0, (nmb - 1),
       KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
-        // Some free functions
-        auto compute_d4u_x_axis = [=](const int m, const VariableIndex IDX,
-                                      const int k, const int j, const int i) {
-          return var(m, IDX, k, j, i + 2) - 4.0 * var(m, IDX, k, j, i + 1) +
-                 6.0 * var(m, IDX, k, j, i) - 4.0 * var(m, IDX, k, j, i - 1) +
-                 var(m, IDX, k, j, i - 2);
-        };
-        auto compute_d4u_y_axis = [=](const int m, const VariableIndex IDX,
-                                      const int k, const int j, const int i) {
-          return var(m, IDX, k, j + 2, i) - 4.0 * var(m, IDX, k, j + 1, i) +
-                 6.0 * var(m, IDX, k, j, i) - 4.0 * var(m, IDX, k, j - 1, i) +
-                 var(m, IDX, k, j - 2, i);
-        };
-        auto compute_d4u_z_axis = [=](const int m, const VariableIndex IDX,
-                                      const int k, const int j, const int i) {
-          return var(m, IDX, k + 2, j, i) - 4.0 * var(m, IDX, k + 1, j, i) +
-                 6.0 * var(m, IDX, k, j, i) - 4.0 * var(m, IDX, k - 1, j, i) +
-                 var(m, IDX, k - 2, j, i);
-        };
-
-        // Another free function -- might need this for momentum criteria
-        auto compute_d4u = [](const Real qp2, const Real qp1, const Real q,
-                              const Real qm1, const Real qm2) {
-          return qp2 - 4.0 * qp1 + 6.0 * q - 4.0 * qm1 + qm2;
-        };
-
-        // Grid refinement flag
+        // Grid refinement flag setup
         int &flag = refine_flag.d_view(m + mbs);
         bool flag_coarsen = true;
 
-        // Error measure reduced within a single MB
-        Real team_abs_d4u_over_u_max = 0.0;
-        
-        // Spectral norm method: check the evolved density variable
-        Kokkos::parallel_reduce(
-            Kokkos::TeamThreadRange(tmember, nkji),
-            [=](const int idx, Real &max_error) {
-              int k = (idx) / nji;
-              int j = (idx - k * nji) / nx1;
-              int i = (idx - k * nji - j * nx1) + is;
-              j += js;
-              k += ks;
+        auto evaluate_field = [=](auto get_var, auto get_var_for_floor,
+                                  const Real floor_value, const Real eps) {
+          Real team_max = 0.0;
+          Kokkos::parallel_reduce(
+              Kokkos::TeamThreadRange(tmember, nkji),
+              [=](const int idx, Real &max_error) {
+                int k = (idx) / nji;
+                int j = (idx - k * nji) / nx1;
+                int i = (idx - k * nji - j * nx1) + is;
+                j += js;
+                k += ks;
 
-              Real abs_d4u_over_u{0.0};
+                // Check if we meet the threshold to evaluate this cell
+                if (get_var_for_floor(k, j, i) > floor_value) {
 
-              // @yk: monitor the AMR criteria only when rho > rho_floor
-              if (u0(m, IDN, k, j, i) > dfloor) {
-                abs_d4u_over_u = fabs(compute_d4u_x_axis(m, IDN, k, j, i));
+                  // Cache center value to save expensive global memory reads
+                  Real c_val = get_var(k, j, i);
 
-                if (multi_d) {
-                  if (spectral_norm_error_policy ==
-                      error_policy_for_multi_dim::sum) {
-                    abs_d4u_over_u += fabs(compute_d4u_y_axis(m, IDN, k, j, i));
-                  } else {
-                    abs_d4u_over_u =
-                        fmax(abs_d4u_over_u,
-                             fabs(compute_d4u_y_axis(m, IDN, k, j, i)));
+                  // X-axis stencil
+                  Real abs_d4u =
+                      fabs(get_var(k, j, i + 2) - 4.0 * get_var(k, j, i + 1) +
+                           6.0 * c_val - 4.0 * get_var(k, j, i - 1) +
+                           get_var(k, j, i - 2));
+
+                  // Y-axis stencil
+                  if (multi_d) {
+                    Real d4u_y =
+                        fabs(get_var(k, j + 2, i) - 4.0 * get_var(k, j + 1, i) +
+                             6.0 * c_val - 4.0 * get_var(k, j - 1, i) +
+                             get_var(k, j - 2, i));
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u += d4u_y;
+                    } else {
+                      abs_d4u = fmax(abs_d4u, d4u_y);
+                    }
                   }
-                }
 
-                if (three_d) {
-                  if (spectral_norm_error_policy ==
-                      error_policy_for_multi_dim::sum) {
-                    abs_d4u_over_u += fabs(compute_d4u_z_axis(m, IDN, k, j, i));
-                  } else {
-                    abs_d4u_over_u =
-                        fmax(abs_d4u_over_u,
-                             fabs(compute_d4u_z_axis(m, IDN, k, j, i)));
+                  // Z-axis stencil
+                  if (three_d) {
+                    Real d4u_z =
+                        fabs(get_var(k + 2, j, i) - 4.0 * get_var(k + 1, j, i) +
+                             6.0 * c_val - 4.0 * get_var(k - 1, j, i) +
+                             get_var(k - 2, j, i));
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u += d4u_z;
+                    } else {
+                      abs_d4u = fmax(abs_d4u, d4u_z);
+                    }
                   }
+
+                  // Normalize and compare
+                  abs_d4u /= (c_val + eps);
+                  max_error = fmax(max_error, abs_d4u);
                 }
+              },
+              Kokkos::Max<Real>(team_max));
 
-                // normalize with the local value at (i,j,k)
-                abs_d4u_over_u /= u0(m, IDN, k, j, i);
-              }
+          return team_max;
+        };
+        // -------------------------------------------------------------------
 
-              max_error = fmax(max_error, abs_d4u_over_u);
-            },
-            Kokkos::Max<Real>(team_abs_d4u_over_u_max));
+        // A generic condition checker function to avoid early returns inside
+        // loops
+        auto apply_refinement_rules = [&](Real team_max_error) {
+          if (team_max_error > thres_refine) {
+            flag = 1;
+            return true; // Indicates we should exit the kernel early
+          }
+          flag_coarsen = flag_coarsen && (team_max_error < thres_coarsen);
+          return false;
+        };
 
-        if (team_abs_d4u_over_u_max > thres_refine) {
-          flag = 1;
+        // check mass density
+        auto get_rho = [=](int k, int j, int i) { return u0(m, IDN, k, j, i); };
+        Real err_rho = evaluate_field(
+            [=](int k, int j, int i) { return var(m, IDN, k, j, i); }, get_rho,
+            dfloor, 0.0);
+        if (apply_refinement_rules(err_rho))
           return;
-        }
-        flag_coarsen =
-            flag_coarsen and (team_abs_d4u_over_u_max < thres_coarsen);
 
-        // Spectral norm method: check the magnitude of the momentum
-        //
-        // @yk: this check is a bit expensive and has a less well-defined scale
-        // of values (e.g. velocity can be very small and there is nothing wrong
-        // with that). Will be good if we do not use this, or consider
-        // monitoring pressure instead?
+        // check momentum magnitude (unlikely to use in practice?)
         if (monitor_momentum) {
-          Kokkos::parallel_reduce(
-              Kokkos::TeamThreadRange(tmember, nkji),
-              [=](const int idx, Real &max_error) {
-                int k = (idx) / nji;
-                int j = (idx - k * nji) / nx1;
-                int i = (idx - k * nji - j * nx1) + is;
-                j += js;
-                k += ks;
+          auto get_mom = [=](int k, int j, int i) {
+            Real m1 = SQR(u0(m, IM1, k, j, i));
+            Real m2 = multi_d ? SQR(u0(m, IM2, k, j, i)) : 0.0;
+            Real m3 = three_d ? SQR(u0(m, IM3, k, j, i)) : 0.0;
+            return std::sqrt(m1 + m2 + m3);
+          };
 
-                Real abs_d4u_over_u{0.0};
-
-                // @yk: monitor the AMR criteria only when rho > rho_floor
-                if (u0(m, IDN, k, j, i) > dfloor) {
-
-                  auto get_momentum_magnitude =
-                      [&u0, &multi_d, &three_d](const int m, const int k,
-                                                const int j, const int i) {
-                        if (three_d) {
-                          return std::sqrt(SQR(u0(m, IM1, k, j, i)) +
-                                           SQR(u0(m, IM2, k, j, i)) +
-                                           SQR(u0(m, IM3, k, j, i)));
-
-                        } else if (multi_d) {
-                          return std::sqrt(SQR(u0(m, IM1, k, j, i)) +
-                                           SQR(u0(m, IM2, k, j, i)));
-                        } else {
-                          return fabs(u0(m, IM1, k, j, i));
-                        }
-                      };
-
-                  abs_d4u_over_u =
-                      fabs(compute_d4u(get_momentum_magnitude(m, k, j, i + 2),
-                                       get_momentum_magnitude(m, k, j, i + 1),
-                                       get_momentum_magnitude(m, k, j, i),
-                                       get_momentum_magnitude(m, k, j, i - 1),
-                                       get_momentum_magnitude(m, k, j, i - 2)));
-
-                  if (multi_d) {
-                    if (spectral_norm_error_policy ==
-                        error_policy_for_multi_dim::sum) {
-                      abs_d4u_over_u += fabs(
-                          compute_d4u(get_momentum_magnitude(m, k, j + 2, i),
-                                      get_momentum_magnitude(m, k, j + 1, i),
-                                      get_momentum_magnitude(m, k, j, i),
-                                      get_momentum_magnitude(m, k, j - 1, i),
-                                      get_momentum_magnitude(m, k, j - 2, i)));
-                    } else {
-                      abs_d4u_over_u =
-                          fmax(abs_d4u_over_u,
-                               fabs(compute_d4u(
-                                   get_momentum_magnitude(m, k, j + 2, i),
-                                   get_momentum_magnitude(m, k, j + 1, i),
-                                   get_momentum_magnitude(m, k, j, i),
-                                   get_momentum_magnitude(m, k, j - 1, i),
-                                   get_momentum_magnitude(m, k, j - 2, i))));
-                    }
-                  }
-
-                  if (three_d) {
-                    if (spectral_norm_error_policy ==
-                        error_policy_for_multi_dim::sum) {
-                      abs_d4u_over_u += fabs(
-                          compute_d4u(get_momentum_magnitude(m, k + 2, j, i),
-                                      get_momentum_magnitude(m, k + 1, j, i),
-                                      get_momentum_magnitude(m, k, j, i),
-                                      get_momentum_magnitude(m, k - 1, j, i),
-                                      get_momentum_magnitude(m, k - 2, j, i)));
-                    } else {
-                      abs_d4u_over_u =
-                          fmax(abs_d4u_over_u,
-                               fabs(compute_d4u(
-                                   get_momentum_magnitude(m, k + 2, j, i),
-                                   get_momentum_magnitude(m, k + 1, j, i),
-                                   get_momentum_magnitude(m, k, j, i),
-                                   get_momentum_magnitude(m, k - 1, j, i),
-                                   get_momentum_magnitude(m, k - 2, j, i))));
-                    }
-                  }
-
-                  // normalize with the local value at (i,j,k)
-                  abs_d4u_over_u /=
-                      (get_momentum_magnitude(m, k, j, i) +
-                       1e-15); // @yk: this epsilon value to avoid div-by-zero
-                               // may be implemented in a better way
-                }
-
-                max_error = fmax(max_error, abs_d4u_over_u);
-              },
-              Kokkos::Max<Real>(team_abs_d4u_over_u_max));
-
-          if (team_abs_d4u_over_u_max > thres_refine) {
-            flag = 1;
+          Real err_mom = evaluate_field(get_mom, get_rho, dfloor, 1e-15);
+          if (apply_refinement_rules(err_mom))
             return;
-          }
-          flag_coarsen =
-              flag_coarsen and (team_abs_d4u_over_u_max < thres_coarsen);
         }
 
+        // check energy density
         if (monitor_energy) {
-          // Spectral norm method: check the evolved energy variable
-          Kokkos::parallel_reduce(
-              Kokkos::TeamThreadRange(tmember, nkji),
-              [=](const int idx, Real &max_error) {
-                int k = (idx) / nji;
-                int j = (idx - k * nji) / nx1;
-                int i = (idx - k * nji - j * nx1) + is;
-                j += js;
-                k += ks;
-
-                Real abs_d4u_over_u{0.0};
-
-                // @yk: monitor the AMR criteria only when e > e_floor
-                if (u0(m, IEN, k, j, i) > efloor) {
-                  abs_d4u_over_u = fabs(compute_d4u_x_axis(m, IEN, k, j, i));
-
-                  if (multi_d) {
-                    if (spectral_norm_error_policy ==
-                        error_policy_for_multi_dim::sum) {
-                      abs_d4u_over_u +=
-                          fabs(compute_d4u_y_axis(m, IEN, k, j, i));
-                    } else {
-                      abs_d4u_over_u =
-                          fmax(abs_d4u_over_u,
-                               fabs(compute_d4u_y_axis(m, IEN, k, j, i)));
-                    }
-                  }
-
-                  if (three_d) {
-                    if (spectral_norm_error_policy ==
-                        error_policy_for_multi_dim::sum) {
-                      abs_d4u_over_u +=
-                          fabs(compute_d4u_z_axis(m, IEN, k, j, i));
-                    } else {
-                      abs_d4u_over_u =
-                          fmax(abs_d4u_over_u,
-                               fabs(compute_d4u_z_axis(m, IEN, k, j, i)));
-                    }
-                  }
-
-                  // normalize with the local value at (i,j,k)
-                  abs_d4u_over_u /= u0(m, IEN, k, j, i);
-                }
-
-                max_error = fmax(max_error, abs_d4u_over_u);
-              },
-              Kokkos::Max<Real>(team_abs_d4u_over_u_max));
-
-          if (team_abs_d4u_over_u_max > thres_refine) {
-            flag = 1;
+          auto get_eng = [=](int k, int j, int i) {
+            return var(m, IEN, k, j, i);
+          };
+          Real err_eng = evaluate_field(get_eng, get_eng, efloor, 0.0);
+          if (apply_refinement_rules(err_eng))
             return;
-          }
-          flag_coarsen =
-              flag_coarsen and (team_abs_d4u_over_u_max < thres_coarsen);
         }
 
-        
-        // Spectral norm method: check the magnitude of B field
-        
+        // check magnetic field magnitude
         if (monitor_magnetic_field) {
-          Kokkos::parallel_reduce(
-              Kokkos::TeamThreadRange(tmember, nkji),
-              [=](const int idx, Real &max_error) {
-                int k = (idx) / nji;
-                int j = (idx - k * nji) / nx1;
-                int i = (idx - k * nji - j * nx1) + is;
-                j += js;
-                k += ks;
-                
-                Real abs_d4u_over_u{0.0};
+          auto get_bfield = [=](int k, int j, int i) {
+            Real b1 = SQR(bcc(m, IBX, k, j, i));
+            Real b2 = multi_d ? SQR(bcc(m, IBY, k, j, i)) : 0.0;
+            Real b3 = three_d ? SQR(bcc(m, IBZ, k, j, i)) : 0.0;
+            return std::sqrt(b1 + b2 + b3);
+          };
 
-                // @yk: monitor the AMR criteria only when rho > rho_floor
-                if (u0(m, IDN, k, j, i) > dfloor) {
-
-                  auto get_magnetic_field_magnitude =
-                      [&bcc, &multi_d, &three_d](const int m, const int k,
-                                                 const int j, const int i) {
-                        if (three_d) {
-                          return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
-                                           SQR(bcc(m, IBY, k, j, i)) +
-                                           SQR(bcc(m, IBZ, k, j, i)));
-
-                        } else if (multi_d) {
-                          return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
-                                           SQR(bcc(m, IBY, k, j, i)));
-                        } else {
-                          return fabs(bcc(m, IBX, k, j, i));
-                        }
-                      };
-
-                  abs_d4u_over_u = fabs(compute_d4u(
-                      get_magnetic_field_magnitude(m, k, j, i + 2),
-                      get_magnetic_field_magnitude(m, k, j, i + 1),
-                      get_magnetic_field_magnitude(m, k, j, i),
-                      get_magnetic_field_magnitude(m, k, j, i - 1),
-                      get_magnetic_field_magnitude(m, k, j, i - 2)));
-
-                  if (multi_d) {
-                    if (spectral_norm_error_policy ==
-                        error_policy_for_multi_dim::sum) {
-                      abs_d4u_over_u += fabs(compute_d4u(
-                          get_magnetic_field_magnitude(m, k, j + 2, i),
-                          get_magnetic_field_magnitude(m, k, j + 1, i),
-                          get_magnetic_field_magnitude(m, k, j, i),
-                          get_magnetic_field_magnitude(m, k, j - 1, i),
-                          get_magnetic_field_magnitude(m, k, j - 2, i)));
-                    } else {
-                      abs_d4u_over_u = fmax(
-                          abs_d4u_over_u,
-                          fabs(compute_d4u(
-                              get_magnetic_field_magnitude(m, k, j + 2, i),
-                              get_magnetic_field_magnitude(m, k, j + 1, i),
-                              get_magnetic_field_magnitude(m, k, j, i),
-                              get_magnetic_field_magnitude(m, k, j - 1, i),
-                              get_magnetic_field_magnitude(m, k, j - 2, i))));
-                    }
-                  }
-
-                  if (three_d) {
-                    if (spectral_norm_error_policy ==
-                        error_policy_for_multi_dim::sum) {
-                      abs_d4u_over_u += fabs(compute_d4u(
-                          get_magnetic_field_magnitude(m, k + 2, j, i),
-                          get_magnetic_field_magnitude(m, k + 1, j, i),
-                          get_magnetic_field_magnitude(m, k, j, i),
-                          get_magnetic_field_magnitude(m, k - 1, j, i),
-                          get_magnetic_field_magnitude(m, k - 2, j, i)));
-                    } else {
-                      abs_d4u_over_u = fmax(
-                          abs_d4u_over_u,
-                          fabs(compute_d4u(
-                              get_magnetic_field_magnitude(m, k + 2, j, i),
-                              get_magnetic_field_magnitude(m, k + 1, j, i),
-                              get_magnetic_field_magnitude(m, k, j, i),
-                              get_magnetic_field_magnitude(m, k - 1, j, i),
-                              get_magnetic_field_magnitude(m, k - 2, j, i))));
-                    }
-                  }
-
-                  // normalize with the local value at (i,j,k)
-                  abs_d4u_over_u /=
-                      (get_magnetic_field_magnitude(m, k, j, i) +
-                       1e-15); // @yk: this epsilon value to avoid div-by-zero
-                               // may be implemented in a better way
-                }
-
-                max_error = fmax(max_error, abs_d4u_over_u);
-              },
-              Kokkos::Max<Real>(team_abs_d4u_over_u_max));
-
-          if (team_abs_d4u_over_u_max > thres_refine) {
-            flag = 1;
+          Real err_b = evaluate_field(get_bfield, get_rho, dfloor, 1e-15);
+          if (apply_refinement_rules(err_b))
             return;
-          }
-          flag_coarsen =
-              flag_coarsen and (team_abs_d4u_over_u_max < thres_coarsen);
         }
 
-        // only derefine when flag has not been set by other criteria
         if (flag_coarsen && (flag == 0)) {
           flag = -1;
         }
