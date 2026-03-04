@@ -439,8 +439,6 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
   // capture evolved/primitive variables
   auto &u0 = (pmbp->phydro != nullptr) ? pmbp->phydro->u0 : pmbp->pmhd->u0;
   auto &w0 = (pmbp->phydro != nullptr) ? pmbp->phydro->w0 : pmbp->pmhd->w0;
-  auto &bcc = pmbp->pmhd->bcc0; // cell-centered magnetic field
-
 
   auto &var = crit.use_primitives ? w0 : u0;
 
@@ -458,31 +456,29 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
   auto &monitor_momentum = crit.monitor_momentum;
   auto &monitor_energy = crit.monitor_energy;
 
-  const bool monitor_magnetic_field =
-      crit.monitor_magnetic_field && (pmbp->pmhd != nullptr);
+  // Safe capture of bcc
+  const bool has_mhd = (pmbp->pmhd != nullptr);
+  const bool monitor_magnetic_field = crit.monitor_magnetic_field && has_mhd;
+  auto bcc = has_mhd ? pmbp->pmhd->bcc0 : DvceArray5D<Real>{};
 
   par_for_outer(
       "SpectralNorm", DevExeSpace(), 0, 0, 0, (nmb - 1),
       KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
         // Some free functions
-        //
-        auto compute_d4u_x_axis = [&var](const int m, const VariableIndex IDX,
-                                         const int k, const int j,
-                                         const int i) {
+        auto compute_d4u_x_axis = [=](const int m, const VariableIndex IDX,
+                                      const int k, const int j, const int i) {
           return var(m, IDX, k, j, i + 2) - 4.0 * var(m, IDX, k, j, i + 1) +
                  6.0 * var(m, IDX, k, j, i) - 4.0 * var(m, IDX, k, j, i - 1) +
                  var(m, IDX, k, j, i - 2);
         };
-        auto compute_d4u_y_axis = [&var](const int m, const VariableIndex IDX,
-                                         const int k, const int j,
-                                         const int i) {
+        auto compute_d4u_y_axis = [=](const int m, const VariableIndex IDX,
+                                      const int k, const int j, const int i) {
           return var(m, IDX, k, j + 2, i) - 4.0 * var(m, IDX, k, j + 1, i) +
                  6.0 * var(m, IDX, k, j, i) - 4.0 * var(m, IDX, k, j - 1, i) +
                  var(m, IDX, k, j - 2, i);
         };
-        auto compute_d4u_z_axis = [&var](const int m, const VariableIndex IDX,
-                                         const int k, const int j,
-                                         const int i) {
+        auto compute_d4u_z_axis = [=](const int m, const VariableIndex IDX,
+                                      const int k, const int j, const int i) {
           return var(m, IDX, k + 2, j, i) - 4.0 * var(m, IDX, k + 1, j, i) +
                  6.0 * var(m, IDX, k, j, i) - 4.0 * var(m, IDX, k - 1, j, i) +
                  var(m, IDX, k - 2, j, i);
@@ -734,21 +730,21 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
                 // @yk: monitor the AMR criteria only when rho > rho_floor
                 if (u0(m, IDN, k, j, i) > dfloor) {
 
-                auto get_magnetic_field_magnitude =
-                    [&bcc, &multi_d, &three_d](const int m, const int k,
-                                               const int j, const int i) {
-                      if (three_d) {
-                        return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
-                                         SQR(bcc(m, IBY, k, j, i)) +
-                                         SQR(bcc(m, IBZ, k, j, i)));
+                  auto get_magnetic_field_magnitude =
+                      [&bcc, &multi_d, &three_d](const int m, const int k,
+                                                 const int j, const int i) {
+                        if (three_d) {
+                          return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
+                                           SQR(bcc(m, IBY, k, j, i)) +
+                                           SQR(bcc(m, IBZ, k, j, i)));
 
-                      } else if (multi_d) {
-                        return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
-                                         SQR(bcc(m, IBY, k, j, i)));
-                      } else {
-                        return fabs(bcc(m, IBX, k, j, i));
-                      }
-                    };
+                        } else if (multi_d) {
+                          return std::sqrt(SQR(bcc(m, IBX, k, j, i)) +
+                                           SQR(bcc(m, IBY, k, j, i)));
+                        } else {
+                          return fabs(bcc(m, IBX, k, j, i));
+                        }
+                      };
 
                   abs_d4u_over_u = fabs(compute_d4u(
                       get_magnetic_field_magnitude(m, k, j, i + 2),
