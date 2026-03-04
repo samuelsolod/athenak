@@ -43,6 +43,8 @@ RefinementCriteria::RefinementCriteria(Mesh *pm, ParameterInput *pin) :
         rcrit0.rmethod = RefCritMethod::second_deriv;
       } else if (method.compare("location") == 0) {
         rcrit0.rmethod = RefCritMethod::location;
+      } else if (method.compare("spectral_norm") == 0) {
+        rcrit0.rmethod = RefCritMethod::spectral_norm;
       } else if (method.compare("user") == 0) {
         rcrit0.rmethod = RefCritMethod::user;
       } else {
@@ -53,12 +55,43 @@ RefinementCriteria::RefinementCriteria(Mesh *pm, ParameterInput *pin) :
       if ((method.compare("location")!=0) && (method.compare("user")!=0)) {
         rcrit0.rvariable = pin->GetString(it->block_name,"variable");
       }
+      if ((method.compare("location") != 0) &&
+          (method.compare("spectral_norm") != 0) &&
+          (method.compare("user") != 0)) {
+        rcrit0.rvariable = pin->GetString(it->block_name, "variable");
+      }
       rcrit0.rvalue_min = pin->GetOrAddReal(it->block_name,"value_min",(-FLT_MAX));
       rcrit0.rvalue_max = pin->GetOrAddReal(it->block_name,"value_max", (FLT_MAX));
       rcrit0.rloc_x1  = pin->GetOrAddReal(it->block_name,"location_x1", 0.0);
       rcrit0.rloc_x2  = pin->GetOrAddReal(it->block_name,"location_x2", 0.0);
       rcrit0.rloc_x3  = pin->GetOrAddReal(it->block_name,"location_x3", 0.0);
       rcrit0.rloc_rad = pin->GetOrAddReal(it->block_name,"location_rad", 0.0);
+
+      // @yk : spectral norm method
+      const bool use_error_policy_sum = pin->GetOrAddBoolean(
+          it->block_name, "use_sum_for_error_policy", false);
+      rcrit0.spectral_norm_error_policy = use_error_policy_sum
+                                              ? error_policy_for_multi_dim::sum
+                                              : error_policy_for_multi_dim::max;
+      rcrit0.spectral_norm_alpha_refine =
+          pin->GetOrAddReal(it->block_name, "alpha_refine", 4.0);
+      rcrit0.spectral_norm_alpha_coarsen =
+          pin->GetOrAddReal(it->block_name, "alpha_coarsen", 5.0);
+
+      rcrit0.dfloor = pin->GetOrAddReal(it->block_name, "dfloor", 1.0e-15);
+      rcrit0.efloor = pin->GetOrAddReal(it->block_name, "efloor", 1.0e-15);
+
+      rcrit0.monitor_momentum =
+          pin->GetOrAddBoolean(it->block_name, "monitor_momentum", false);
+      rcrit0.monitor_energy =
+          pin->GetOrAddBoolean(it->block_name, "monitor_energy", false);
+
+      rcrit0.use_primitives =
+          pin->GetOrAddBoolean(it->block_name, "use_primitives", false);
+
+      rcrit0.monitor_magnetic_field =
+          pin->GetOrAddBoolean(it->block_name, "monitor_magnetic_field", false);
+
       rcrit.emplace_back(rcrit0);
     }
   }
@@ -105,13 +138,13 @@ RefinementCriteria::RefinementCriteria(Mesh *pm, ParameterInput *pin) :
 
   // Set rdata array to shallow slice of target data
   SetRefinementData(pm->pmb_pack, false, false);
+
 }
 
 //----------------------------------------------------------------------------------------
 // destructor
 
-RefinementCriteria::~RefinementCriteria() {
-}
+RefinementCriteria::~RefinementCriteria() {}
 
 //----------------------------------------------------------------------------------------
 //! \fn void RefinementCriteria::SetRefinementData()
@@ -123,6 +156,7 @@ void RefinementCriteria::SetRefinementData(MeshBlockPack* pmbp, bool count_deriv
   for (auto it = rcrit.begin(); it != rcrit.end(); ++it) {
     // Only load data for methods that need it
     if ((it->rmethod != RefCritMethod::location) &&
+        (it->rmethod != RefCritMethod::spectral_norm) &&
         (it->rmethod != RefCritMethod::user)) {
       using Kokkos::ALL;
       // hydro (lab-frame) density
@@ -382,5 +416,185 @@ void RefinementCriteria::CheckLocation(MeshBlockPack* pmbp, RefCritData crit) {
   // sync host array with device
   refine_flag.template modify<HostMemSpace>();
   refine_flag.template sync<DevExeSpace>();
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
+                                           RefCritData crit) {
+  auto &refine_flag = pmbp->pmesh->pmr->refine_flag;
+  int mbs = pmbp->pmesh->gids_eachrank[global_variable::my_rank];
+
+  // capture variables for kernels
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int &is = indcs.is, nx1 = indcs.nx1;
+  int &js = indcs.js, nx2 = indcs.nx2;
+  int &ks = indcs.ks, nx3 = indcs.nx3;
+  const int nkji = nx3 * nx2 * nx1;
+  const int nji = nx2 * nx1;
+  int nmb = pmbp->nmb_thispack;
+  auto &multi_d = pmbp->pmesh->multi_d;
+  auto &three_d = pmbp->pmesh->three_d;
+
+  // capture evolved/primitive variables
+  auto &u0 = (pmbp->phydro != nullptr) ? pmbp->phydro->u0 : pmbp->pmhd->u0;
+  auto &w0 = (pmbp->phydro != nullptr) ? pmbp->phydro->w0 : pmbp->pmhd->w0;
+
+  auto &var = crit.use_primitives ? w0 : u0;
+
+  // refinement thresholds for a 5-stencil
+  const Real spectral_norm_refine = pow(4.0, -crit.spectral_norm_alpha_refine);
+  const Real spectral_norm_coarsen =
+      pow(4.0, -crit.spectral_norm_alpha_coarsen);
+
+  auto &thres_refine = spectral_norm_refine;
+  auto &thres_coarsen = spectral_norm_coarsen;
+  auto &dfloor = crit.dfloor;
+  auto &efloor = crit.efloor;
+
+  auto &spectral_norm_error_policy = crit.spectral_norm_error_policy;
+  auto &monitor_momentum = crit.monitor_momentum;
+  auto &monitor_energy = crit.monitor_energy;
+
+  // Safe capture of bcc
+  const bool has_mhd = (pmbp->pmhd != nullptr);
+  const bool monitor_magnetic_field = crit.monitor_magnetic_field && has_mhd;
+  auto bcc = has_mhd ? pmbp->pmhd->bcc0 : DvceArray5D<Real>{};
+
+  par_for_outer(
+      "SpectralNorm", DevExeSpace(), 0, 0, 0, (nmb - 1),
+      KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+        // Grid refinement flag setup
+        int &flag = refine_flag.d_view(m + mbs);
+        bool flag_coarsen = true;
+
+        auto evaluate_field = [=](auto get_var, auto get_var_for_floor,
+                                  const Real floor_value, const Real eps) {
+          Real team_max = 0.0;
+          Kokkos::parallel_reduce(
+              Kokkos::TeamThreadRange(tmember, nkji),
+              [=](const int idx, Real &max_error) {
+                int k = (idx) / nji;
+                int j = (idx - k * nji) / nx1;
+                int i = (idx - k * nji - j * nx1) + is;
+                j += js;
+                k += ks;
+
+                // Check if we meet the threshold to evaluate this cell
+                if (get_var_for_floor(k, j, i) > floor_value) {
+
+                  // Cache center value to save expensive global memory reads
+                  Real c_val = get_var(k, j, i);
+
+                  // X-axis stencil
+                  Real abs_d4u =
+                      fabs(get_var(k, j, i + 2) - 4.0 * get_var(k, j, i + 1) +
+                           6.0 * c_val - 4.0 * get_var(k, j, i - 1) +
+                           get_var(k, j, i - 2));
+
+                  // Y-axis stencil
+                  if (multi_d) {
+                    Real d4u_y =
+                        fabs(get_var(k, j + 2, i) - 4.0 * get_var(k, j + 1, i) +
+                             6.0 * c_val - 4.0 * get_var(k, j - 1, i) +
+                             get_var(k, j - 2, i));
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u += d4u_y;
+                    } else {
+                      abs_d4u = fmax(abs_d4u, d4u_y);
+                    }
+                  }
+
+                  // Z-axis stencil
+                  if (three_d) {
+                    Real d4u_z =
+                        fabs(get_var(k + 2, j, i) - 4.0 * get_var(k + 1, j, i) +
+                             6.0 * c_val - 4.0 * get_var(k - 1, j, i) +
+                             get_var(k - 2, j, i));
+                    if (spectral_norm_error_policy ==
+                        error_policy_for_multi_dim::sum) {
+                      abs_d4u += d4u_z;
+                    } else {
+                      abs_d4u = fmax(abs_d4u, d4u_z);
+                    }
+                  }
+
+                  // Normalize and compare
+                  abs_d4u /= (c_val + eps);
+                  max_error = fmax(max_error, abs_d4u);
+                }
+              },
+              Kokkos::Max<Real>(team_max));
+
+          return team_max;
+        };
+        // -------------------------------------------------------------------
+
+        // A generic condition checker function to avoid early returns inside
+        // loops
+        auto apply_refinement_rules = [&](Real team_max_error) {
+          if (team_max_error > thres_refine) {
+            flag = 1;
+            return true; // Indicates we should exit the kernel early
+          }
+          flag_coarsen = flag_coarsen && (team_max_error < thres_coarsen);
+          return false;
+        };
+
+        // check mass density
+        auto get_rho = [=](int k, int j, int i) { return u0(m, IDN, k, j, i); };
+        Real err_rho = evaluate_field(
+            [=](int k, int j, int i) { return var(m, IDN, k, j, i); }, get_rho,
+            dfloor, 0.0);
+        if (apply_refinement_rules(err_rho))
+          return;
+
+        // check momentum magnitude (unlikely to use in practice?)
+        if (monitor_momentum) {
+          auto get_mom = [=](int k, int j, int i) {
+            Real m1 = SQR(u0(m, IM1, k, j, i));
+            Real m2 = multi_d ? SQR(u0(m, IM2, k, j, i)) : 0.0;
+            Real m3 = three_d ? SQR(u0(m, IM3, k, j, i)) : 0.0;
+            return std::sqrt(m1 + m2 + m3);
+          };
+
+          Real err_mom = evaluate_field(get_mom, get_rho, dfloor, 1e-15);
+          if (apply_refinement_rules(err_mom))
+            return;
+        }
+
+        // check energy density
+        if (monitor_energy) {
+          auto get_eng = [=](int k, int j, int i) {
+            return var(m, IEN, k, j, i);
+          };
+          Real err_eng = evaluate_field(get_eng, get_eng, efloor, 0.0);
+          if (apply_refinement_rules(err_eng))
+            return;
+        }
+
+        // check magnetic field magnitude
+        if (monitor_magnetic_field) {
+          auto get_bfield = [=](int k, int j, int i) {
+            Real b1 = SQR(bcc(m, IBX, k, j, i));
+            Real b2 = multi_d ? SQR(bcc(m, IBY, k, j, i)) : 0.0;
+            Real b3 = three_d ? SQR(bcc(m, IBZ, k, j, i)) : 0.0;
+            return std::sqrt(b1 + b2 + b3);
+          };
+
+          Real err_b = evaluate_field(get_bfield, get_rho, dfloor, 1e-15);
+          if (apply_refinement_rules(err_b))
+            return;
+        }
+
+        if (flag_coarsen && (flag == 0)) {
+          flag = -1;
+        }
+      });
+
+  // sync device array with host
+  refine_flag.template modify<DevExeSpace>();
+  refine_flag.template sync<HostMemSpace>();
   return;
 }

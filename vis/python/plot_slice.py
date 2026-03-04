@@ -489,8 +489,9 @@ def main(**kwargs):
                     slice_block_n = block_nz
                     slice_location_min = float(input_data['mesh']['x3min'])
                     slice_location_max = float(input_data['mesh']['x3max'])
-                    slice_root_blocks = (int(input_data['mesh']['nx3'])
-                                         // int(input_data['meshblock']['nx3']))
+                    mesh_nx3 = int(input_data['mesh'].get('nx3', 1))
+                    meshblock_nx3 = int(input_data.get('meshblock', {}).get('nx3', 1))
+                    slice_root_blocks = mesh_nx3 // meshblock_nx3
                 slice_normalized_coord = (kwargs['location'] - slice_location_min) \
                     / (slice_location_max - slice_location_min)
                 first_time = False
@@ -1139,15 +1140,29 @@ def main(**kwargs):
 
     # Prepare figure
     plt.figure()
-
+    plt.xlabel('x1', fontsize=18)
+    plt.ylabel('x2', fontsize=18)
+    plt.xticks(fontsize=14)
+    plt.yticks(fontsize=14)
+    
     # Plot data
     for block_num in range(num_blocks_used):
         plt.imshow(quantity[block_num], cmap=kwargs['cmap'], norm=norm, vmin=vmin,
                    vmax=vmax, interpolation='none', origin='lower',
                    extent=extents[block_num])
+        
+    
 
     # Make colorbar
-    plt.colorbar(label=label)
+    cbar = plt.colorbar()
+    cbar.set_label(label, fontsize=18)      # match axis label font size
+    cbar.ax.tick_params(labelsize=14)       # match axis tick label size
+    
+    # Set limits for axes to remove whitespace
+    # plt.xlim(-0.2, 0.2)
+    # plt.ylim(-0.6, 0.6)
+
+    # plt.title('Density Slice at t = 3.0, reconstruct = wenoz, rsolver = hllc')
 
     # Mark grid
     if kwargs['grid']:
@@ -1293,7 +1308,7 @@ def main(**kwargs):
 
     # Save or display figure
     if kwargs['output_file'] != 'show':
-        plt.savefig(kwargs['output_file'], dpi=kwargs['dpi'])
+        plt.savefig(kwargs['output_file'], dpi=kwargs['dpi'], bbox_inches='tight')
     else:
         plt.show()
 

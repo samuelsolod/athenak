@@ -1,0 +1,129 @@
+# AthenaXXX input file for Liska & Wendroff implosion test
+
+<comment>
+problem   = 2D implosion from Liska & Wendroff
+reference = Liska, R. & Wendroff, B., SIAM J. Sci. Comput., 25, 995-1017 (2003)
+
+<job>
+basename  = Implode   # problem ID: basename of output filenames
+
+<mesh>
+nghost    = 4           # Number of ghost cells
+nx1       = 64         # Number of zones in X1-direction
+x1min     = 0.0         # minimum value of X1
+x1max     = 0.3         # maximum value of X1
+ix1_bc    = reflect     # inner-X1 boundary flag
+ox1_bc    = reflect     # outer-X1 boundary flag
+
+nx2       = 64         # Number of zones in X2irection
+x2min     = 0.0         # minimum value of X2
+x2max     = 0.3         # maximum value of X2
+ix2_bc    = reflect     # inner-X2 boundary flag
+ox2_bc    = reflect     # outer-X2 boundary flag
+
+nx3       = 1           # Number of zones in X3-direction
+x3min     = -0.5        # minimum value of X3
+x3max     = 0.5         # maximum value of X3
+ix3_bc    = periodic    # inner-X3 boundary flag
+ox3_bc    = periodic    # outer-X3 boundary flag
+
+<meshblock>
+nx1       = 16         # Number of cells in each MeshBlock, X1-dir
+nx2       = 16         # Number of cells in each MeshBlock, X2-dir
+nx3       = 1           # Number of cells in each MeshBlock, X3-dir
+
+
+<mesh_refinement>
+refinement = adaptive
+num_levels = 4
+refinement_interval = 10
+max_nmb_per_rank = 4096
+
+<amr_criterion0>
+method = spectral_norm
+variable = hydro_w_d
+use_sum_for_error_policy = false
+alpha_refine = 2.0
+alpha_coarsen = 3.0
+dfloor = 1.0e-10
+efloor = 1.0e-10
+monitor_momentum = false
+monitor_energy = true
+use_primitives = false
+monitor_magnetic_field = false
+
+<refined_region0>
+level = 1
+x1min = 0.0
+x1max = 0.075
+x2min = 0.075
+x2max = 0.15
+
+<refined_region1>
+level = 1
+x1min = 0.075
+x1max = 0.15
+x2min = 0.0
+x2max = 0.075
+
+<refined_region2>
+level=2
+x1min = 0.0
+x1max = 0.0375
+x2min = 0.1175
+x2max = 0.15
+
+<refined_region3>
+level=2
+x1min = 0.0375
+x1max = 0.075
+x2min = 0.075
+x2max = 0.1175
+
+<refined_region4>
+level=2
+x1min = 0.075
+x1max = 0.1175
+x2min = 0.025
+x2max = 0.075
+
+<refined_region5>
+level=2
+x1min = 0.1175
+x1max = 0.15
+x2min = 0.0
+x2max = 0.025
+
+<time>
+evolution  = dynamic   # dynamic/kinematic/static
+integrator = rk2       # time integration algorithm
+cfl_number = 0.4       # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1        # cycle limit
+tlim       = 2.5       # time limit
+ndiag      = 1         # cycles between diagostic output
+
+<hydro>
+eos         = ideal    # EOS type
+reconstruct = plm      # spatial reconstruction method
+rsolver     = hllc      # Riemann-solver to be used
+gamma       = 1.4         # gamma = C_p/C_v
+
+<problem>
+pgen_name = implode     # problem generator name
+# Interior Conditions
+d_in  = 0.125           # density
+p_in  = 0.14            # pressure
+
+# Exterior Conditions
+d_out  = 1.0            # density
+p_out  = 1.0            # pressure
+
+<output1>
+file_type   = hst       # history data dump
+data_format = %12.5e    # optional data format string
+dt          = 0.1       # time increment between outputs
+
+<output2>
+file_type  = bin        # legacy VTK output
+variable   = hydro_w    # variables to be output
+dt         = 0.1       # time increment between outputs
