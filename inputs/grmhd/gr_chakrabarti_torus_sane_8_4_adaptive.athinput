@@ -10,51 +10,53 @@ reference = Chakrabarti, S. 1985, ApJ 288, 1
 <job>
 basename  = torus
 
+<restart>
+restart_filename = /data/solod/simulations/grTorus/testTorus/simulation_25/rst/torus.00014.rst
+
 <mesh>
 nghost = 4        # Number of ghost cells
-nx1    = 16       # number of cells in x1-direction
+nx1    = 64       # number of cells in x1-direction
 x1min  = -128.0   # minimum x1
 x1max  = 128.0    # maximum x1
 ix1_bc = user     # inner boundary
 ox1_bc = user     # outer boundary
 
-nx2    = 16       # number of cells in x2-direction
+nx2    = 64       # number of cells in x2-direction
 x2min  = -128.0   # minimum x2
 x2max  = 128.0    # maximum x2
 ix2_bc = user     # inner boundary
 ox2_bc = user     # outer boundary
 
-nx3    = 16       # number of cells in x3-direction
+nx3    = 64       # number of cells in x3-direction
 x3min  = -128.0   # minimum x3
 x3max  = 128.0    # maximum x3
 ix3_bc = user     # inner boundary
 ox3_bc = user     # outer boundary
 
 <meshblock>
-nx1  = 4         # Number of cells in each MeshBlock, X1-dir
-nx2  = 4         # Number of cells in each MeshBlock, X2-dir
-nx3  = 4         # Number of cells in each MeshBlock, X3-dir
+nx1  = 16         # Number of cells in each MeshBlock, X1-dir
+nx2  = 16         # Number of cells in each MeshBlock, X2-dir
+nx3  = 16         # Number of cells in each MeshBlock, X3-dir
 
 <mesh_refinement>
-refinement = static  # type of refinement
-# refinement = adaptive
-# num_levels = 4
-# refinement_interval = 10
-# max_nmb_per_rank = 8192 
+refinement = adaptive
+num_levels = 6 
+refinement_interval = 100
+max_nmb_per_rank = 1400
 
 # dpres_max = 0.05
 # ddens_max = 0.3
 # curve_max = 0.1
 # curve_min = 0.001
 
-# alpha_refine = 7             # refine threshold for power moniter (Deppe 2023)
-# alpha_coarsen = 8            # coarsening threshold for power moniter (Deppe 2023)
-# stencil_order = 3            # 3 point, 5 point
-# variable = 1                 # 1 = density, 2 = velocity, 3 = density and momentum
-# refine_threshold = 0.04      # refine threshold for high order derivitive criteria
-# coarsen_threshold = 0.006    # coarsen threshold for high order derivitive criteria
+#alpha_refine = 5             # refine threshold for power moniter (Deppe 2023)
+#alpha_coarsen = 6            # coarsening threshold for power moniter (Deppe 2023)
+stencil_order = 5            # 3 point, 5 point
+variable = 3                 # 1 = density, 2 = velocity, 3 = density and momentum
+refine_threshold = 500      # refine threshold for high order derivitive criteria
+coarsen_threshold = 5    # coarsen threshold for high order derivitive criteria
 
-<refined_region1>
+<refinement1>
 level = 1
 x1min = -64.0
 x1max = 64.0
@@ -63,7 +65,7 @@ x2max = 64.0
 x3min = -64.0
 x3max = 64.0
 
-<refined_region2>
+<refinement2>
 level = 2
 x1min = -32.0
 x1max = 32.0
@@ -72,7 +74,7 @@ x2max = 32.0
 x3min = -32.0
 x3max = 32.0
 
-<refined_region3>
+<refinement3>
 level = 3
 x1min = -16.0
 x1max = 16.0
@@ -81,7 +83,7 @@ x2max = 16.0
 x3min = -16.0
 x3max = 16.0
 
-<refined_region4>
+<refinement4>
 level = 4
 x1min = -8.0
 x1max = 8.0
@@ -90,7 +92,7 @@ x2max = 8.0
 x3min = -8.0
 x3max = 8.0
 
-<refined_region5>
+<refinement5>
 level = 5
 x1min = -4.0
 x1max = 4.0
@@ -104,7 +106,7 @@ evolution  = dynamic     # dynamic/kinematic/static
 integrator = rk2         # time integration algorithm
 cfl_number = 0.3         # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1          # cycle limit
-tlim       = 10000.0     # time limit
+tlim       = 100000.0     # time limit
 ndiag      = 1           # cycles between diagostic output
 
 <coord>
@@ -116,7 +118,7 @@ pexcise     = 0.333e-10  # pressure inside excision
 
 <mhd>
 eos         = ideal      # EOS type
-reconstruct = ppm4       # spatial reconstruction method
+reconstruct = plm       # spatial reconstruction method
 rsolver     = hlle       # Riemann-solver to be used
 dfloor      = 1.0e-8     # floor on density rho
 pfloor      = 0.333e-10  # floor on gas pressure p_gas
@@ -129,7 +131,7 @@ chakrabarti_torus = true  # Chakrabarti
 r_edge            = 10.0  # radius of inner edge of disk
 r_peak            = 30.2  # radius of pressure maximum; use l instead if negative
 tilt_angle        = 0.0   # angle (deg) to incl disk spin axis rel. to BH spin in dir of x
-potential_beta_min = 100.0  # ratio of gas to magnetic pressure at maxima (diff locations)
+potential_beta_min = 1.0  # ratio of gas to magnetic pressure at maxima (diff locations), change to lower values for higher magnetization
 potential_cutoff   = 0.2    # amount to subtract from density when calculating potential
 potential_rho_pow = 1.0     # dependence of the vector potential on density rho
 rho_min   = 1.0e-5    # background on rho given by rho_min ...
@@ -143,14 +145,14 @@ user_hist = true      # enroll user-defined history function
 
 <output1>
 file_type  = hst        # History output
-dt         = 10.0       # time increment between outputs
+dt         = 100.0       # time increment between outputs
 user_hist_only = true   # only output user-defined history
 
 <output2>
 file_type  = bin        # Binary data dump
 variable   = mhd_w_bcc  # variables to be output
-dt         = 100.0      # time increment between outputs
+dcycle = 100.0
 
 <output3>
 file_type  = rst
-dt         = 100.0      # time increment between outputs
+dcycle = 100.0      
