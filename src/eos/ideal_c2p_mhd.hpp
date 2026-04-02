@@ -257,10 +257,18 @@ void SingleC2P_IdealSRMHD(MHDCons1D &u, const EOS_Data &eos, Real s2, Real b2, R
   Real lor = sqrt(1.0 + z2);
 
   // compute density then apply floor
-  Real dens = u.d/lor;
+  //
+  // @YK : if density is below the floor, also floor internal energy and set
+  // velocity to zero.
+  Real dens = u.d / lor;
   if (dens < dfloor_) {
-    dens = dfloor_;
     dfloor_used = true;
+    w.d = eos.dfloor;
+    w.e = eos.pfloor / gm1; // Ideal gas
+    w.vx = 0.0;
+    w.vy = 0.0;
+    w.vz = 0.0;
+    return;
   }
 
   // compute specific internal energy density then apply floors
