@@ -9,13 +9,13 @@ basename  = Blast      # problem ID: basename of output filenames
 
 <mesh>
 nghost    = 2          # Number of ghost cells
-nx1       = 128        # Number of zones in X1-direction
+nx1       = 64        # Number of zones in X1-direction
 x1min     = -0.5      # minimum value of X1
 x1max     = 0.5       # maximum value of X1
 ix1_bc    = periodic   # inner-X1 boundary flag
 ox1_bc    = periodic   # outer-X1 boundary flag
 
-nx2       = 128        # Number of zones in X2-direction
+nx2       = 64        # Number of zones in X2-direction
 x2min     = -0.5      # minimum value of X2
 x2max     = 0.5       # maximum value of X2
 ix2_bc    = periodic   # inner-X2 boundary flag
@@ -28,20 +28,28 @@ ix3_bc    = periodic   # inner-X3 boundary flag
 ox3_bc    = periodic   # outer-X3 boundary flag
 
 <meshblock>
-nx1       = 8         # Number of cells in each MeshBlock, X1-dir
-nx2       = 8         # Number of cells in each MeshBlock, X2-dir
+nx1       = 8          # Number of cells in each MeshBlock, X1-dir
+nx2       = 8          # Number of cells in each MeshBlock, X2-dir
 nx3       = 1           # Number of cells in each MeshBlock, X3-dir
 
 <mesh_refinement>
 refinement = adaptive
-num_levels = 2
-refinement_interval = 3
+num_levels = 4
+refinement_interval = 10
 max_nmb_per_rank = 1024
 
 <amr_criterion0>
-method = slope
+method = spectral_norm
+use_sum_for_error_policy = false
 variable = hydro_w_d
-value_max = 0.1
+alpha_refine = 2.0
+alpha_coarsen = 3.0
+dfloor = 1.0e-10
+efloor = 1.0e-10
+monitor_momentum = false
+monitor_energy = false
+use_primitives = false
+monitor_magnetic_field = false
 
 <time>
 evolution  = dynamic    # dynamic/kinematic/static
@@ -49,7 +57,7 @@ integrator = rk2        # time integration algorithm
 cfl_number = 0.3        # The Courant, Friedrichs, & Lewy (CFL) Number
 nlim       = -1         # cycle limit
 tlim       = 0.5        # time limit
-ndiag      = 1          # cycles between diagostic output
+ndiag      = 100        # cycles between diagostic output
 
 <hydro>
 eos         = ideal     # EOS type
@@ -70,4 +78,4 @@ dt         = 0.001       # time increment between outputs
 <output2>
 file_type  = bin        # Binary data dump
 variable   = hydro_w    # variables to be output
-dt         = 0.01       # time increment between outputs
+dt         = 0.1       # time increment between outputs
