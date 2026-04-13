@@ -148,7 +148,7 @@ def main(**kwargs):
 
     # Plotting parameters
     grid_line_style = '-'
-    grid_line_width = 0.5
+    grid_line_width = 1.5
     horizon_line_style = '-'
     horizon_line_width = 1.0
     ergosphere_num_points = 129

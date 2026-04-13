@@ -6,20 +6,20 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file refinement_criteria.hpp
-//! \brief defines RefinementCriteria class containing data and functions
-//! controlling how mesh is refined/derefined with AMR This class implementes
-//! default refinement conditions:
+//! \brief defines RefinementCriteria class containing data and functions controlling
+//! how mesh is refined/derefined with AMR
+//! This class implements default refinement conditions:
 //!   (1) min/max of selected variable
 //!   (2) gradient of selected variable
 //!   (3) second derivative of selected variable
 //!   (4) region with specified radius of a selected point
 //! Any number of refinement criteria can be specified using multiple
-//! <refinement_criteriaN> blocks in the input file.  Each block can select a
-//! different method and/or hydro/MHD/radiation variables can be selected.
+//! <refinement_criteriaN> blocks in the input file.  Each block can select a different
+//! method and/or hydro/MHD/radiation variables can be selected.
 //! TODO(@JMS): user-defined variables can also be selected
 //!
-//! User-defined refinement conditions can also be enrolled by setting the
-//! *usr_ref_func pointer in the problem generator.
+//! User-defined refinement conditions can also be enrolled by setting the *usr_ref_func
+//! pointer in the problem generator.
 
 #include <string>
 #include <vector>
