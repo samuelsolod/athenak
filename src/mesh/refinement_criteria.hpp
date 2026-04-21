@@ -71,6 +71,7 @@ struct RefCritData {
   bool monitor_energy;
   bool use_primitives;
   bool monitor_magnetic_field;
+  int max_level;
 };
 
 //----------------------------------------------------------------------------------------

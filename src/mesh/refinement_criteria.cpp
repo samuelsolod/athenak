@@ -92,6 +92,8 @@ RefinementCriteria::RefinementCriteria(Mesh *pm, ParameterInput *pin) :
       rcrit0.monitor_magnetic_field =
           pin->GetOrAddBoolean(it->block_name, "monitor_magnetic_field", false);
 
+      rcrit0.max_level = pin->GetInteger(it->block_name, "max_level");
+
       rcrit.emplace_back(rcrit0);
     }
   }
@@ -461,12 +463,17 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
   const bool monitor_magnetic_field = crit.monitor_magnetic_field && has_mhd;
   auto bcc = has_mhd ? pmbp->pmhd->bcc0 : DvceArray5D<Real>{};
 
+  auto& max_level = crit.max_level;
+
   par_for_outer(
       "SpectralNorm", DevExeSpace(), 0, 0, 0, (nmb - 1),
       KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
         // Grid refinement flag setup
         int &flag = refine_flag.d_view(m + mbs);
         bool flag_coarsen = true;
+
+        const auto grid_level =
+            pmy_mesh->lloc_eachmb[m + mbs].level - pmy_mesh->root_level;
 
         auto evaluate_field = [=](auto get_var, auto get_var_for_floor,
                                   const Real floor_value, const Real eps) {
@@ -535,8 +542,14 @@ void RefinementCriteria::CheckSpectralNorm(MeshBlockPack *pmbp,
         // loops
         auto apply_refinement_rules = [&](Real team_max_error) {
           if (team_max_error > thres_refine) {
-            flag = 1;
-            return true; // Indicates we should exit the kernel early
+            // Only set the refine flag if we haven't reached the maximum level
+            if (grid_level < max_level) {
+              flag = 1;
+            }
+            // Return true to exit early and save computation.
+            // Even if we hit max_level and didn't set flag = 1, the error is
+            // too high to coarsen, so we can safely stop checking this block.
+            return true;
           }
           flag_coarsen = flag_coarsen && (team_max_error < thres_coarsen);
           return false;
