@@ -4,7 +4,8 @@ Block-based AMR framework with fluid, particle and numerical relativity solvers 
 
 ## Overview
 
-AthenaK is a complete rewrite of the AMR framework and fluid solvers in the [Athena++](https://github.com/PrincetonUniversity/athena) astrophysical MHD code using the [Kokkos](https://kokkos.org/) programming model.
+AthenaK is a complete rewrite of the AMR framework and fluid solvers in the [Athena++](https://github.com/PrincetonUniversity/athena) astrophysical MHD code using the [Kokkos](https://kokkos.org/) programming model.  Note that Athena++ is itself an extension of the original C-version of
+[Athena](https://github.com/PrincetonUniversity/Athena-Cversion).
 
 Using Kokkos enables *performance-portability*.  AthenaK will run on any hardware supported by Kokkos, including CPU, GPUs from various vendors, and ARM processors.
 
@@ -19,6 +20,12 @@ AthenaK is targeting challenging problems that require exascale resources, and a
 - GR hydrodynamics and MHD in dynamical spacetimes
 
 The numerical algorithms implemented in AthenaK are all based on higher-order finite volume methods with a variety of reconstruction algorithms, Riemann solvers, and time integration methods.
+
+AthenaK was developed in conjunction with the 
+[Parthenon AMR framework](https://github.com/parthenon-hpc-lab/parthenon) and borrows many features
+from that effort. It is also closely related to the 
+[AthenaPK MHD code](https://github.com/parthenon-hpc-lab/athenapk), which is another implementation
+of Athena++ based on the Parthenon framework.
 
 ## Getting Started
 
