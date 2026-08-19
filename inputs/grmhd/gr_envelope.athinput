@@ -1,0 +1,212 @@
+# AthenaK input file for GR MHD run initialized from a grid-matched tabulated envelope
+# data file (gr_envelope pgen). The CSV's grid is a nested-box SMR structure that must
+# exactly mirror this file's <mesh>/<mesh_refinement> block -- see
+# make_athenak_ic_smr_grid.py for how the CSV is built and why the meshblock/root-nx1
+# choices below are required for the refined-region boundaries to land exactly on
+# coarser-level meshblock boundaries (root nx1 = nx_per_level, meshblock = root nx1 /
+# (a power of 2), so every halving level reproduces nx_per_level cells across its own box).
+#
+# These specific numbers (root_half_width_rsun=10.0, n_levels=12, nx_per_level=16,
+# bhmass_g=1.9891e34) match
+# /projects/b1094/solod/envelopeFit/test_smr_grid/athenak_ic_smr_grid_test.csv. If you
+# regenerate the CSV with different settings, x1min/x1max and every refined_regionN block
+# below must be recomputed to match (half_width[L] = root_half_width_rsun * 6.958e10 cm /
+# 2^L, converted to code units via M = G*bhmass_g/c^2).
+#
+# Compile with: cmake -D PROBLEM=gr_envelope ..
+
+<comment>
+problem   = GR envelope initial data, direct lookup from a grid-matched tabulated file
+
+<job>
+basename  = envelope
+
+<mesh>
+nghost = 2          # kept < meshblock size (4); plm only needs 2 ghost zones anyway
+nx1    = 16         # = nx_per_level, so root meshblocks (nx1/meshblock=4) tile it evenly
+x1min  = -471061.71 # root_half_width_rsun * 6.958e10 cm, in code units (M) for bhmass=10.0034 Msun
+x1max  = 471061.71
+ix1_bc = outflow
+ox1_bc = outflow
+
+nx2    = 16
+x2min  = -471061.71
+x2max  = 471061.71
+ix2_bc = outflow
+ox2_bc = outflow
+
+nx3    = 16
+x3min  = -471061.71
+x3max  = 471061.71
+ix3_bc = outflow
+ox3_bc = outflow
+
+<meshblock>
+nx1  = 4            # matches the CSV generator's meshblock-alignment requirement
+nx2  = 4
+nx3  = 4
+
+<mesh_refinement>
+refinement = static
+
+<refined_region1>
+level = 1
+x1min = -235530.86
+x1max = 235530.86
+x2min = -235530.86
+x2max = 235530.86
+x3min = -235530.86
+x3max = 235530.86
+
+<refined_region2>
+level = 2
+x1min = -117765.43
+x1max = 117765.43
+x2min = -117765.43
+x2max = 117765.43
+x3min = -117765.43
+x3max = 117765.43
+
+<refined_region3>
+level = 3
+x1min = -58882.71
+x1max = 58882.71
+x2min = -58882.71
+x2max = 58882.71
+x3min = -58882.71
+x3max = 58882.71
+
+<refined_region4>
+level = 4
+x1min = -29441.36
+x1max = 29441.36
+x2min = -29441.36
+x2max = 29441.36
+x3min = -29441.36
+x3max = 29441.36
+
+<refined_region5>
+level = 5
+x1min = -14720.68
+x1max = 14720.68
+x2min = -14720.68
+x2max = 14720.68
+x3min = -14720.68
+x3max = 14720.68
+
+<refined_region6>
+level = 6
+x1min = -7360.34
+x1max = 7360.34
+x2min = -7360.34
+x2max = 7360.34
+x3min = -7360.34
+x3max = 7360.34
+
+<refined_region7>
+level = 7
+x1min = -3680.17
+x1max = 3680.17
+x2min = -3680.17
+x2max = 3680.17
+x3min = -3680.17
+x3max = 3680.17
+
+<refined_region8>
+level = 8
+x1min = -1840.08
+x1max = 1840.08
+x2min = -1840.08
+x2max = 1840.08
+x3min = -1840.08
+x3max = 1840.08
+
+<refined_region9>
+level = 9
+x1min = -920.04
+x1max = 920.04
+x2min = -920.04
+x2max = 920.04
+x3min = -920.04
+x3max = 920.04
+
+<refined_region10>
+level = 10
+x1min = -460.02
+x1max = 460.02
+x2min = -460.02
+x2max = 460.02
+x3min = -460.02
+x3max = 460.02
+
+<refined_region11>
+level = 11
+x1min = -230.01
+x1max = 230.01
+x2min = -230.01
+x2max = 230.01
+x3min = -230.01
+x3max = 230.01
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 10000.0
+ndiag      = 1
+
+<coord>
+general_rel = true
+a           = 0.9375     # black hole spin a (0 <= a/M < 1); free choice, not set by the CSV
+excise      = true
+dexcise     = 1.0e-8
+pexcise     = 0.333e-10
+
+<units>
+bhmass_msun = 10.003441 # = bhmass_g (1.98910000e+34) / Units::msun_cgs -- must match this
+                         # exactly (or you'll get the startup mismatch warning), since it's
+                         # what fixes M = GM/c^2 and therefore the domain size above
+density_cgs = 1.0e-3    # code-unit normalization; the CSV's rho ranges ~1.5e-6 to ~6.9
+                         # g/cm^3 (median ~3.6e-3), so this lands the bulk of it O(1)-O(10^3)
+                         # in code units. Tune to your own file's density scale.
+mu          = 0.5
+
+<mhd>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+dfloor      = 1.0e-8
+pfloor      = 0.333e-10
+gamma       = 1.6666666666666667  # ratio of specific heats Gamma; tune to your envelope gas
+fofc        = true
+gamma_max   = 20.0
+
+<problem>
+initial_data_file  = /projects/b1094/solod/envelopeFit/test_smr_grid/athenak_ic_smr_grid_test.csv
+rho_min   = 1.0e-8    # background/atmosphere: rho_min * r^rho_pow (code units)
+rho_pow   = -1.5
+pgas_min  = 0.333e-10 # background/atmosphere: pgas_min * r^pgas_pow (code units)
+pgas_pow  = -2.5
+potential_beta_min = 100.0  # target ratio of gas to magnetic pressure at maxima
+potential_cutoff   = 0.2    # amount subtracted from the scaled density in the potential
+potential_r_pow    = 0.0    # 0 = SANE-like; try e.g. 3.0 for a MAD-like configuration
+potential_falloff  = 0.0    # 0 disables the exponential falloff term
+potential_rho_pow  = 1.0    # dependence of the vector potential on looked-up density
+potential_r_in     = 50.0   # innermost radius (code units, M) of the seed-field region;
+                             # no natural "table inner edge" scale anymore, so this has no
+                             # data-driven default -- set explicitly for your problem. Kept
+                             # above the finest level's cell size (~28.75 M here) since
+                             # everything between excision (~1.35 M for a=0.9375) and there
+                             # is pure atmosphere floor regardless (the table doesn't resolve
+                             # that close in) -- magnetizing that gap would just seed a field
+                             # in floor-density gas, not real envelope material.
+
+<output1>
+file_type  = hst
+dt         = 10.0
+
+<output2>
+file_type  = bin
+variable   = mhd_w_bcc
+dt         = 100.0
