@@ -18,9 +18,14 @@
 //! (coordinate transforms, excision handling, MHD seed-field machinery).
 //!
 //! Expected CSV format:
-//!   Line 1 (metadata, optionally "#"-prefixed):
-//!     "bhpos_cm = .., .., .. ; r_sink_cm = .. ; bhmass_g = .. ;
-//!      root_half_width_rsun = .. ; n_levels = .. ; nx_per_level = .."
+//!   Line 1 (metadata, optionally "#"-prefixed; other keys are present but unused here):
+//!     "... ; M_BH_new_g = .. ; ... ; ROOT_HALF_WIDTH_RG = .. ; n_levels = .. ;
+//!      nx_per_level = .. ; ..."
+//!   ROOT_HALF_WIDTH_RG is in units of the file's own gravitational radius
+//!   r_g = G*M_BH_new_g/c^2 (NOT R_sun, despite the historical "_rsun" naming this
+//!   replaced) -- converted to cm here using the file's own bhmass_g, then to code units
+//!   via <units>. See make_athenak_ic_smr_grid.py's header-writing code for the exact key
+//!   set this must stay in sync with.
 //!   Line 2 (header): level,x_center_cm,y_center_cm,z_center_cm,rho_g_cm3,vx_cm_s,vy_cm_s,
 //!                    vz_cm_s,eint_erg_g,n_cells
 //!   Then one row per OCCUPIED cell (sparse -- empty cells are simply absent), in any
@@ -68,10 +73,6 @@
 
 namespace {
 
-// Solar radius in cm; must match the value used to generate the CSV (unit_rsun in
-// make_athenak_ic_smr_grid.py), since only root_half_width_rsun is given in the header.
-constexpr Real kRsunCgs = 6.958e10;
-
 // device-resident tabulated data (bundled so it can be passed by value into device lambdas
 // and helper functions the same way scalar pgen parameters are). Flat, dense storage over
 // all levels: index = level*nx_per_level^3 + (i*nx_per_level + j)*nx_per_level + k.
@@ -94,7 +95,7 @@ struct envelope_pgen {
 
 // host-side staging area for the parsed CSV, before unit conversion / device upload
 struct CsvTable {
-  Real root_half_width_rsun = 0.0;
+  Real root_half_width_rg = 0.0;   // in units of the file's own r_g = G*bhmass_g/c^2
   int n_levels = 0, nx_per_level = 0;
   Real bhmass_g = 0.0;
   std::vector<int> level;
@@ -214,7 +215,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     }
     std::cout << "gr_envelope: read " << tab.x.size() << " occupied cells (n_levels="
               << tab.n_levels << ", nx_per_level=" << tab.nx_per_level
-              << ", root_half_width_rsun=" << tab.root_half_width_rsun << ") from "
+              << ", root_half_width_rg=" << tab.root_half_width_rg << ") from "
               << data_file << std::endl;
   }
 
@@ -227,7 +228,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   egen.n_levels = tab.n_levels;
   egen.nx_per_level = tab.nx_per_level;
-  egen.root_half_width = tab.root_half_width_rsun * kRsunCgs * cu_length;
+
+  // The file's ROOT_HALF_WIDTH_RG is in units of the file's OWN r_g = G*bhmass_g/c^2 --
+  // computed here from the file's bhmass_g independently of whatever <units>/bhmass_msun
+  // says (the warning above already checks the two agree), matching how the previous
+  // R_sun-based version used a fixed physical constant (kRsunCgs) rather than trusting the
+  // input file's units to already agree with the run's own unit system.
+  Real r_g_cm_csv = units::Units::grav_constant_cgs * tab.bhmass_g
+                     / SQR(units::Units::speed_of_light_cgs);
+  egen.root_half_width = tab.root_half_width_rg * r_g_cm_csv * cu_length;
 
   // Bin each occupied CSV row into its (level,i,j,k) dense-array slot. Index placement
   // uses raw cm coordinates (matching exactly how make_athenak_ic_smr_grid.py itself
@@ -238,7 +247,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
                      h_vz("h_vz", ntab), h_eint("h_eint", ntab), h_valid("h_valid", ntab);
   for (long n = 0; n < ntab; ++n) { h_valid(n) = 0.0; }
 
-  Real root_hw_cm = tab.root_half_width_rsun * kRsunCgs;
+  Real root_hw_cm = tab.root_half_width_rg * r_g_cm_csv;
   for (size_t row = 0; row < tab.x.size(); ++row) {
     int L = tab.level[row];
     if (L < 0 || L >= tab.n_levels) {
@@ -893,10 +902,10 @@ bool ReadEnvelopeCsv(const std::string &fname, CsvTable *tab) {
     return it->second;
   };
   try {
-    tab->root_half_width_rsun = std::stod(require_key("root_half_width_rsun"));
+    tab->root_half_width_rg = std::stod(require_key("ROOT_HALF_WIDTH_RG"));
     tab->n_levels = std::stoi(require_key("n_levels"));
     tab->nx_per_level = std::stoi(require_key("nx_per_level"));
-    tab->bhmass_g = std::stod(require_key("bhmass_g"));
+    tab->bhmass_g = std::stod(require_key("M_BH_new_g"));
   } catch (const std::exception &e) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "Failed to parse envelope data file metadata line: " << e.what()
