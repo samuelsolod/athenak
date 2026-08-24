@@ -188,19 +188,16 @@ rho_min   = 1.0e-8    # background/atmosphere: rho_min * r^rho_pow (code units)
 rho_pow   = -1.5
 pgas_min  = 0.333e-10 # background/atmosphere: pgas_min * r^pgas_pow (code units)
 pgas_pow  = -2.5
-potential_beta_min = 100.0  # target ratio of gas to magnetic pressure at maxima
-potential_cutoff   = 0.2    # amount subtracted from the scaled density in the potential
-potential_r_pow    = 0.0    # 0 = SANE-like; try e.g. 3.0 for a MAD-like configuration
-potential_falloff  = 0.0    # 0 disables the exponential falloff term
-potential_rho_pow  = 1.0    # dependence of the vector potential on looked-up density
-potential_r_in     = 50.0   # innermost radius (code units, M) of the seed-field region;
-                             # no natural "table inner edge" scale anymore, so this has no
-                             # data-driven default -- set explicitly for your problem. Kept
-                             # above the finest level's cell size (~28.75 M here) since
-                             # everything between excision (~1.35 M for a=0.9375) and there
-                             # is pure atmosphere floor regardless (the table doesn't resolve
-                             # that close in) -- magnetizing that gap would just seed a field
-                             # in floor-density gas, not real envelope material.
+potential_beta_min = 100.0  # target ratio of gas to magnetic pressure at maxima (Issa
+                             # et al. 2025 target beta~few in the core specifically -- tune
+                             # to match if reproducing their setup)
+# Rcore, Rstar of Eq. (12) in Issa et al. 2025 (ApJL 985, L26): A_phi = sin^2(theta) *
+# max[r^2/(r^2+Rcore^2) - (r/Rstar)^3, 0]. Below are THAT paper's fiducial progenitor
+# values (Rcore=1e8 cm, Rstar=4e10 cm), converted to this file's code units (M = 1.4773e6
+# cm, from bhmass_msun=10.003441 above) purely so this file runs out of the box -- replace
+# with initial_data_file's own core/stellar radius once known.
+potential_r_core   = 67.7     # = 1e8 cm
+potential_r_star   = 27076.4  # = 4e10 cm
 
 <output1>
 file_type  = hst
