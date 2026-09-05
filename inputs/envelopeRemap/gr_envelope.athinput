@@ -1,0 +1,314 @@
+# ============================================================================================
+# AthenaK input file: GR MHD collapse/accretion run of a tabulated stellar-envelope
+# initial condition onto a black hole, using the `gr_envelope` problem generator
+# (src/pgen/fluids/gr_envelope.cpp).
+#
+# WHAT THIS RUNS
+#   Gas density, velocity, and specific internal energy are read directly from an
+#   external CSV data file (initial_data_file, below) rather than being set by an
+#   analytic formula. That CSV is a snapshot of a star (originally simulated with the
+#   moving-mesh code AREPO) remapped onto a nested-box static mesh refinement (SMR)
+#   grid centered on the black hole, in gravitational-radius (r_g) units -- see
+#   make_athenak_ic_smr_grid.py (co-located in this directory) for exactly how that
+#   remapping is done. On top of the tabulated gas, gr_envelope seeds a large-scale
+#   poloidal magnetic field analytically (Eq. 12 of Issa et al. 2025, ApJL 985, L26),
+#   normalized to a target plasma beta -- see the <problem> block below.
+#
+# REQUIRED CONSISTENCY BETWEEN THIS FILE AND THE CSV
+#   The CSV's nested-box grid must exactly coincide, level for level, with this file's
+#   <mesh>/<mesh_refinement> block: the pgen looks up each mesh cell's tabulated value
+#   by nearest-cell indexing (no interpolation), so any mismatch between the two grids
+#   silently produces wrong initial data rather than an error. Concretely, this requires:
+#     - root <mesh> nx1 (128 below) == the CSV's nx_per_level,
+#     - each <refined_regionN> half-width == the CSV's ROOT_HALF_WIDTH_RG / 2^N,
+#     - <meshblock> nx1 (32 below) evenly divides the root nx1 by a power of 2 (here,
+#       128/32 = 4), which is what guarantees every refined_region boundary lands
+#       exactly on a meshblock edge at every refinement level, rather than AthenaK's
+#       meshblock-granularity refinement silently refining a larger region than the
+#       CSV actually resolved.
+#   All of the numeric values below (ROOT_HALF_WIDTH_RG=17235.4775, n_levels=13,
+#   nx_per_level=128, M_BH_new_msun=5890.29732) were read from the header of
+#   /projects/b1094/solod/envelopeFit/productionBiggerDomain/athenak_ic_rg.csv, the
+#   specific CSV this file is paired with (see initial_data_file below). If that CSV is
+#   regenerated with different settings, every x1min/x1max and refined_regionN block
+#   here must be recomputed from its new header's ROOT_HALF_WIDTH_RG/n_levels/
+#   nx_per_level fields (half_width at level L = ROOT_HALF_WIDTH_RG / 2^L).
+#
+# UNIT CONVENTION
+#   The CSV's cell-center positions are already expressed in units of r_g = G*M_BH/c^2
+#   for the run's black-hole mass, and AthenaK's own GR code-length unit M is defined
+#   identically (M = G*bhmass_g/c^2, fixed by <units>/bhmass_msun below) -- so the CSV's
+#   position values can be used directly as AthenaK mesh coordinates with no further
+#   unit conversion. This domain's half-width (17235.4775 M) was chosen in the CSV
+#   generator to exactly match the original AREPO simulation's box half-width, so the
+#   root SMR box covers the star's entire simulated extent with no gas cropped at the
+#   domain boundary.
+#
+# Compile gr_envelope.cpp with: cmake Athena_ENABLE_MPI=ON -D PROBLEM=fluids/gr_envelope ..
+
+<job>
+basename  = envelope
+
+<mesh>
+nghost = 4          # ghost-zone width; sized for the ppm4 (4th-order) reconstruction
+                     # stencil selected in <mhd> below, which needs more ghost cells than
+                     # a 2nd-order scheme like plm would
+nx1    = 128         # root-level cell count per axis; equals the CSV's nx_per_level so the
+                     # root grid's cells line up one-to-one with the CSV's level-0 cells
+x1min  = -17235.477520264445   # -ROOT_HALF_WIDTH_RG, in code units (M = r_g, fixed by
+                                # <units>/bhmass_msun below)
+x1max  = 17235.477520264445    # +ROOT_HALF_WIDTH_RG
+
+nx2    = 128
+x2min  = -17235.477520264445
+x2max  = 17235.477520264445
+
+nx3    = 128
+x3min  = -17235.477520264445
+x3max  = 17235.477520264445
+# All three axes use outflow (zero-gradient, non-reflecting) boundaries, letting gas and
+# jet/wind outflow freely leave the domain without being reflected back in.
+ix1_bc = outflow
+ox1_bc = outflow
+ix2_bc = outflow
+ox2_bc = outflow
+ix3_bc = outflow
+ox3_bc = outflow
+
+<meshblock>
+# Meshblock size must divide the root nx1 by a power of 2 (128/32 = 4 here) so that every
+# refined_regionN boundary below, each a power-of-2 fraction of the root box, lands exactly
+# on a meshblock edge at every refinement level -- see the file header for why this matters.
+nx1  = 32
+nx2  = 32
+nx3  = 32
+
+<mesh_refinement>
+refinement = static
+
+# Each refined_regionN below is a cube centered on the black hole with half-width
+# ROOT_HALF_WIDTH_RG / 2^level (level 1 = half the root box, level 2 = a quarter, etc.),
+# matching the nested-box levels of the CSV described in the file header. Level 12 (the
+# innermost, finest box) is the deepest level present in the CSV for this run.
+<refined_region1>
+level = 1
+x1min = -8617.738760132223
+x1max = 8617.738760132223
+x2min = -8617.738760132223
+x2max = 8617.738760132223
+x3min = -8617.738760132223
+x3max = 8617.738760132223
+
+<refined_region2>
+level = 2
+x1min = -4308.869380066111
+x1max = 4308.869380066111
+x2min = -4308.869380066111
+x2max = 4308.869380066111
+x3min = -4308.869380066111
+x3max = 4308.869380066111
+
+<refined_region3>
+level = 3
+x1min = -2154.4346900330556
+x1max = 2154.4346900330556
+x2min = -2154.4346900330556
+x2max = 2154.4346900330556
+x3min = -2154.4346900330556
+x3max = 2154.4346900330556
+
+<refined_region4>
+level = 4
+x1min = -1077.2173450165278
+x1max = 1077.2173450165278
+x2min = -1077.2173450165278
+x2max = 1077.2173450165278
+x3min = -1077.2173450165278
+x3max = 1077.2173450165278
+
+<refined_region5>
+level = 5
+x1min = -538.6086725082639
+x1max = 538.6086725082639
+x2min = -538.6086725082639
+x2max = 538.6086725082639
+x3min = -538.6086725082639
+x3max = 538.6086725082639
+
+<refined_region6>
+level = 6
+x1min = -269.30433625413195
+x1max = 269.30433625413195
+x2min = -269.30433625413195
+x2max = 269.30433625413195
+x3min = -269.30433625413195
+x3max = 269.30433625413195
+
+<refined_region7>
+level = 7
+x1min = -134.65216812706598
+x1max = 134.65216812706598
+x2min = -134.65216812706598
+x2max = 134.65216812706598
+x3min = -134.65216812706598
+x3max = 134.65216812706598
+
+<refined_region8>
+level = 8
+x1min = -67.32608406353299
+x1max = 67.32608406353299
+x2min = -67.32608406353299
+x2max = 67.32608406353299
+x3min = -67.32608406353299
+x3max = 67.32608406353299
+
+<refined_region9>
+level = 9
+x1min = -33.663042031766494
+x1max = 33.663042031766494
+x2min = -33.663042031766494
+x2max = 33.663042031766494
+x3min = -33.663042031766494
+x3max = 33.663042031766494
+
+<refined_region10>
+level = 10
+x1min = -16.831521015883247
+x1max = 16.831521015883247
+x2min = -16.831521015883247
+x2max = 16.831521015883247
+x3min = -16.831521015883247
+x3max = 16.831521015883247
+
+<refined_region11>
+level = 11
+x1min = -8.415760507941624
+x1max = 8.415760507941624
+x2min = -8.415760507941624
+x2max = 8.415760507941624
+x3min = -8.415760507941624
+x3max = 8.415760507941624
+
+<refined_region12>
+level = 12
+x1min = -4.207880253970812
+x1max = 4.207880253970812
+x2min = -4.207880253970812
+x2max = 4.207880253970812
+x3min = -4.207880253970812
+x3max = 4.207880253970812
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 17235.0  # stop time in code units (M, with G=c=1). Numerically close to
+                       # ROOT_HALF_WIDTH_RG (17235.4775 M): since a light ray covers one
+                       # unit of coordinate distance per unit of coordinate time in these
+                       # units, this is approximately one light-crossing time from the
+                       # black hole to the edge of the domain.
+ndiag      = 1
+
+<coord>
+general_rel = true
+a           = 0.6      # dimensionless black hole spin, a/M (0 = non-spinning Schwarzschild,
+                        # 1 = maximally spinning Kerr)
+excise      = true      # carve out a small region around the BH and hold it at the floor
+                         # values below, instead of evolving the (numerically stiff) GRMHD
+                         # equations all the way to the singularity
+dexcise     = 1.0e-8     # rest-mass density held fixed inside the excised region
+pexcise     = 0.333e-10  # gas pressure held fixed inside the excised region
+
+<units>
+# In general-relativistic mode, AthenaK derives its mass/length/time code units from just
+# these two physical inputs (bhmass_msun, density_cgs) rather than from separate
+# length/mass/time unit parameters -- see units::Units's constructor.
+bhmass_msun = 5890.29732 # black hole mass in solar masses; together with G=c=1 this fixes
+                          # the code's length unit to M = G*bhmass_g/c^2 = r_g, which is
+                          # also the unit the tabulated CSV's positions are expressed in
+                          # (see the file header). Must equal the CSV header's
+                          # M_BH_new_msun exactly, or AthenaK prints a startup mismatch
+                          # warning (the run still proceeds using this file's value).
+density_cgs = 1.0e-3     # cgs density corresponding to one code unit of density. Chosen
+                          # so that the CSV's nonzero densities (which range from
+                          # ~1.1e-11 to ~5.8 g/cm^3, with a low median of ~4.2e-5 g/cm^3
+                          # because most of this large domain is low-density outer
+                          # material) land close to O(1)-O(10^3) in code units, which
+                          # keeps the EOS and floor values below in a well-conditioned
+                          # numerical range.
+mu          = 0.5        # mean molecular weight, used only when converting code-unit
+                          # pressure/density to a cgs temperature for diagnostics
+                          # (Units::temperature_cgs()) -- it does not affect the
+                          # evolved GRMHD fields themselves, which use the ideal-gas EOS
+                          # directly in code units.
+
+<mhd>
+eos         = ideal    # ideal-gas equation of state, p = (gamma-1)*rho*eps
+reconstruct = ppm4     # 4th-order piecewise-parabolic reconstruction of cell interface
+                        # states (paired with the wider nghost=4 stencil set above)
+rsolver     = hlle     # HLLE approximate Riemann solver for the MHD fluxes
+dfloor      = 1.0e-8     # minimum rest-mass density enforced everywhere on the grid
+pfloor      = 0.333e-10  # minimum gas pressure enforced everywhere on the grid
+gamma       = 1.6666666666666667  # adiabatic index Gamma = 5/3 (monatomic ideal gas);
+                                    # tune to whatever equation of state the envelope's
+                                    # source simulation assumed
+fofc        = true     # enable first-order flux correction: if a high-order (ppm4) update
+                        # would produce an unphysical state (e.g. negative density/
+                        # pressure), that cell is redone with a robust first-order update
+                        # instead of failing
+gamma_max   = 20.0      # ceiling on the fluid Lorentz factor; conserved-to-primitive
+                         # inversion rescales the velocity down to this value if it would
+                         # otherwise be exceeded, guarding against unphysically fast flows
+
+<problem>
+initial_data_file  = /projects/b1094/solod/envelopeFit/productionBiggerDomain/athenak_ic_rg.csv
+                       # tabulated envelope data (see the file header); must be paired with
+                       # a <mesh>/<mesh_refinement> block that matches this CSV's own grid
+# Power-law atmosphere/background floor applied wherever the CSV has no tabulated data for
+# a cell (outside the CSV's occupied cells, or before any table lookup is attempted) --
+# see gr_envelope.cpp's rho_bg/pgas_bg. Both are evaluated at the cell's Boyer-Lindquist
+# radius r (code units) and are distinct from -- and generally set well below -- the hard
+# dfloor/pfloor numerical floors above.
+rho_min   = 1.0e-8    # background density = rho_min * r^rho_pow
+rho_pow   = -1.5
+pgas_min  = 0.333e-10 # background pressure = pgas_min * r^pgas_pow
+pgas_pow  = -2.5
+# Seed poloidal magnetic field: an analytic vector potential (Eq. 12 of Issa et al. 2025,
+# ApJL 985, L26; see CalculateEnvelopeVectorPotential in gr_envelope.cpp),
+#   A_phi(r,theta) = sin^2(theta) * max[r^2/(r^2+Rcore^2) - (r/Rstar)^3, 0],
+# which produces a field that is nearly uniform and vertical for r <~ Rcore, turns radial
+# further out, and closes (A_phi -> 0) near r = Rstar. Its overall amplitude is not set
+# directly; instead, the pgen computes B = curl(A) with this shape at an arbitrary scale
+# and then rescales the whole field so that (max gas pressure)/(max magnetic pressure)
+# equals potential_beta_min.
+potential_beta_min = 10.0  # target ratio of gas to magnetic pressure at their respective
+                            # maxima over the whole grid, after the field above is applied
+potential_r_core   = 35    # Rcore, code units (M) -- radius over which the field stays
+                            # close to uniform/vertical. At this run's black hole mass,
+                            # 35 M ~ 3.0e10 cm ~ 0.44 R_sun.
+potential_r_star   = 800   # Rstar, code units (M) -- radius at which the field closes.
+                            # At this run's black hole mass, 800 M ~ 7.0e11 cm ~ 10 R_sun,
+                            # i.e. intended to sit at (or near) the tabulated star's outer
+                            # radius; it is not read from initial_data_file automatically,
+                            # so if the envelope's stellar radius changes, update this too.
+
+# History file: domain-integrated/reduced scalar diagnostics (e.g. total mass, fluxes),
+# appended once every dt in code-unit time.
+<output1>
+file_type  = hst
+dt         = 10.0
+
+# Binary snapshot output: full 3D primitive density, velocity, and cell-centered magnetic
+# field (mhd_w_bcc), written once every dt in code-unit time. This is the main volumetric
+# data used for visualization/post-processing.
+<output2>
+file_type  = bin
+variable   = mhd_w_bcc
+dt         = 25.0
+
+# Restart file: complete simulation state, written once every dt in code-unit time, so the
+# run can be resumed from a checkpoint after an interruption.
+<output3>
+file_type  = rst
+dt         = 1000.0
