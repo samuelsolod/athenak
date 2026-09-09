@@ -4,42 +4,83 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file gr_envelope.cpp
-//! \brief Problem generator that initializes a GR hydro/MHD run in Cartesian Kerr-Schild
-//! coordinates from tabulated data (density, velocity, specific internal energy) read from
-//! a CSV file whose grid is a nested-box static-mesh-refinement (SMR) structure that
-//! EXACTLY mirrors the AthenaK mesh's own <mesh_refinement> structure: a root box of
-//! half-width root_half_width, with n_levels-1 refined levels nested inside it, each
-//! covering half the linear extent of its parent at double the resolution (nx_per_level
-//! cells across its own box, at every level). Because the grids are meant to coincide
-//! exactly, cell values are looked up directly (nearest-cell), not interpolated -- see
-//! make_athenak_ic_smr_grid.py (the reference generator this format is based on) for the
-//! precise construction and the meshblock-alignment requirement this places on the
-//! matching AthenaK <mesh>/<mesh_refinement> block. Reuses gr_torus.cpp's GR plumbing
-//! (coordinate transforms, excision handling, MHD seed-field machinery).
+//! \brief Problem generator that initializes a GR hydro/MHD run of a collapsing/accreting
+//! stellar envelope onto a black hole, in Cartesian Kerr-Schild coordinates, by directly
+//! reading gas density, velocity, and specific internal energy from a tabulated CSV file
+//! rather than setting them from a closed-form analytic solution (contrast gr_torus.cpp,
+//! whose equilibrium torus IS analytic). On top of that tabulated gas, an analytic
+//! large-scale poloidal magnetic field can optionally be seeded (MHD runs only) following
+//! Eq. (12) of Issa et al. 2025, ApJL 985, L26.
 //!
-//! Expected CSV format:
-//!   Line 1 (metadata, optionally "#"-prefixed; other keys are present but unused here):
+//! GRID FORMAT AND WHY LOOKUP IS EXACT RATHER THAN INTERPOLATED
+//!   The CSV's grid is a nested-box static mesh refinement (SMR) structure that must
+//!   EXACTLY mirror the AthenaK mesh's own <mesh_refinement> structure: a root box of
+//!   half-width root_half_width, with n_levels-1 refined levels nested inside it, each
+//!   covering half the linear extent of its parent at double the resolution (nx_per_level
+//!   cells across its own box, at every level). Because the two grids are meant to coincide
+//!   exactly cell-for-cell, this pgen looks up each mesh cell's value directly by nearest-
+//!   cell indexing (LookupEnvelopeCell) rather than interpolating -- see
+//!   make_athenak_ic_smr_grid.py (the reference generator this format is based on) for the
+//!   precise construction and the meshblock-alignment requirement this places on the
+//!   matching AthenaK <mesh>/<mesh_refinement> block. A mismatch between the two grids
+//!   produces wrong initial data silently (no error is raised). Reuses gr_torus.cpp's GR
+//!   plumbing (Boyer-Lindquist coordinate transforms, excision handling, and the curl-of-
+//!   vector-potential/beta-normalization machinery for seeding a magnetic field).
+//!
+//! CSV FORMAT
+//!   Line 1 (metadata, optionally "#"-prefixed; other keys may be present but are unused
+//!   here):
 //!     "... ; M_BH_new_g = .. ; ... ; ROOT_HALF_WIDTH_RG = .. ; n_levels = .. ;
 //!      nx_per_level = .. ; ..."
 //!   ROOT_HALF_WIDTH_RG is in units of the file's own gravitational radius
-//!   r_g = G*M_BH_new_g/c^2 (NOT R_sun, despite the historical "_rsun" naming this
-//!   replaced) -- converted to cm here using the file's own bhmass_g, then to code units
-//!   via <units>. See make_athenak_ic_smr_grid.py's header-writing code for the exact key
-//!   set this must stay in sync with.
-//!   Line 2 (header): level,x_center_cm,y_center_cm,z_center_cm,rho_g_cm3,vx_cm_s,vy_cm_s,
-//!                    vz_cm_s,eint_erg_g,n_cells
-//!   Then one row per OCCUPIED cell (sparse -- empty cells are simply absent), in any
-//!   order. "level" in [0, n_levels), where level L's box has half-width
+//!   r_g = G*M_BH_new_g/c^2 (NOT R_sun, despite the "_rsun"-suffixed name this parameter
+//!   sometimes carries in generator scripts) -- converted to cm here using the file's own
+//!   bhmass_g, then to code units via <units>. See make_athenak_ic_smr_grid.py's header-
+//!   writing code for the exact key set this must stay in sync with.
+//!   Line 2 (column header): level,x_center_cm,y_center_cm,z_center_cm,rho_g_cm3,vx_cm_s,
+//!                           vy_cm_s,vz_cm_s,eint_erg_g,n_cells
+//!   Then one row per OCCUPIED cell (sparse -- empty cells are simply absent from the
+//!   file), in any order. "level" is in [0, n_levels), where level L's box has half-width
 //!   root_half_width/2^L and nx_per_level cells across it in each dimension, with a point
 //!   belonging to the FINEST level whose box (by Chebyshev/L-infinity distance from the
 //!   BH) contains it. Coordinates are already BH-centered. vx/vy/vz are physical Cartesian
 //!   velocity components (cm/s) aligned with the same x/y/z axes as AthenaK's Cartesian-KS
 //!   mesh coordinates (i.e. already in the mesh's coordinate basis, not a spherical
-//!   orthonormal frame -- no BL rotation is needed to use them). n_cells is a source
-//!   particle/cell count and is unused here (only occupied cells are ever written).
+//!   orthonormal frame -- no Boyer-Lindquist rotation is needed to use them directly).
+//!   n_cells is a source particle/cell count, carried through for diagnostic purposes by
+//!   the generator script but not read by this pgen (only occupied cells are ever written
+//!   to the file in the first place, so its absence would be equally informative).
 //!
-//! Requires a <units> block with bhmass_msun and density_cgs (see units/units.hpp) to
-//! convert the file's cgs quantities into code units.
+//! INPUTS
+//!   - <units>/bhmass_msun, density_cgs (required -- see units/units.hpp): fix the code's
+//!     mass/length/time units, which must be consistent with the CSV's own bhmass_g (a
+//!     mismatch beyond 1% triggers a startup warning; the run proceeds using the input
+//!     file's value regardless).
+//!   - <problem>/initial_data_file: path to the CSV described above.
+//!   - <problem>/rho_min, rho_pow, pgas_min, pgas_pow: power-law background/atmosphere
+//!     floor, rho_bg = rho_min*r^rho_pow, pgas_bg = pgas_min*r^pgas_pow, used wherever the
+//!     CSV has no data for a cell.
+//!   - <problem>/potential_beta_min, potential_r_core, potential_r_star (MHD runs only):
+//!     seed-field target plasma beta and the Rcore/Rstar shape parameters of Eq. (12) --
+//!     see CalculateEnvelopeVectorPotential below.
+//!
+//! OUTPUTS / SIDE EFFECTS
+//!   Initializes the mesh's primitive (and, for MHD, face- and cell-centered magnetic
+//!   field) arrays for a fresh run. Unlike gr_torus.cpp, this pgen does NOT install a
+//!   custom boundary condition or a user history function -- boundary behavior is whatever
+//!   the input file's ix1_bc/ox1_bc/etc. specify directly (typically outflow), and no
+//!   accretion-flux diagnostics are recorded automatically.
+//!
+//! ASSUMPTIONS
+//!   - Static background spacetime (BH mass and spin fixed for the whole run).
+//!   - The tabulated velocities carry no relativistic correction from the source
+//!     simulation that produced the CSV, so they are converted to a 4-velocity via a
+//!     flat-space Lorentz-factor relation (see the primitive-setting kernel in
+//!     UserProblem()) -- an approximation, not an exact GR transform.
+//!   - Code units follow the standard GR convention G = c = M_BH = 1.
+//!
+//! Compile with '-D PROBLEM=fluids/gr_envelope' to enroll as user-specific problem
+//! generator.
 
 #include <cstdlib>    // exit, EXIT_FAILURE
 #include <cmath>      // pow, sqrt, fabs
@@ -135,8 +176,13 @@ bool ReadEnvelopeCsv(const std::string &fname, CsvTable *tab);
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
 //! \brief Sets initial conditions for a GR hydro/MHD run from a grid-matched tabulated
-//! envelope data file.
-//! Compile with '-D PROBLEM=gr_envelope' to enroll as user-specific problem generator
+//! envelope data file (see the file header above for the CSV format and grid-matching
+//! requirement). Runs in five stages: (1) read the CSV and upload it to the device as a
+//! flat, dense per-level lookup table; (2) set every cell's primitive density/velocity/
+//! pressure from that table (falling back to a background floor or the excision floor);
+//! (3) initialize ADM variables for dynamical-spacetime runs; (4) for MHD, build and
+//! normalize an analytic seed magnetic field; (5) convert primitives to conserved
+//! variables.
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
@@ -218,7 +264,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
               << data_file << std::endl;
   }
 
-  // Convert to code units (once, host-side)
+  // Convert to code units (once, host-side). cu_X() is "code units per X-in-cgs", so
+  // multiplying a cgs quantity by cu_X converts it to code units.
   Real cu_length = pmbp->punit->cm();
   Real cu_dens   = pmbp->punit->g_cm3();
   Real cu_vel    = pmbp->punit->cm_s();   // velocity_cgs()==c exactly in GR mode, so this
@@ -229,10 +276,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   egen.nx_per_level = tab.nx_per_level;
 
   // The file's ROOT_HALF_WIDTH_RG is in units of the file's OWN r_g = G*bhmass_g/c^2 --
-  // computed here from the file's bhmass_g independently of whatever <units>/bhmass_msun
-  // says (the warning above already checks the two agree), matching how the previous
-  // R_sun-based version used a fixed physical constant (kRsunCgs) rather than trusting the
-  // input file's units to already agree with the run's own unit system.
+  // computed here directly from the CSV's own bhmass_g (independently of whatever
+  // <units>/bhmass_msun says) so that the grid geometry below is correct even if the two
+  // masses disagree slightly (the warning above already checks that they agree to within
+  // the stated tolerance).
   Real r_g_cm_csv = units::Units::grav_constant_cgs * tab.bhmass_g
                      / SQR(units::Units::speed_of_light_cgs);
   egen.root_half_width = tab.root_half_width_rg * r_g_cm_csv * cu_length;
@@ -289,6 +336,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Kokkos::deep_copy(tabs.valid, h_valid);
 
   // initialize primitive variables for new run ---------------------------------------
+  // For every cell: look it up in the tabulated envelope data (LookupEnvelopeCell); if
+  // found, convert its tabulated Cartesian velocity to a primitive 4-velocity and set
+  // rho/p_gas from the tabulated density/specific internal energy; otherwise (or wherever
+  // the tabulated value is smaller) fall back to the power-law background or, near/inside
+  // the BH, the fixed excision floor. While doing so, also track the maximum total
+  // pressure over the whole grid (max_ptot) -- needed below to normalize the seed magnetic
+  // field to a target plasma beta.
 
   auto etrs = egen;
   auto &size = pmbp->pmb->mb_size;
@@ -352,10 +406,20 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real uu1 = 0.0, uu2 = 0.0, uu3 = 0.0, pgas;
     if (valid > 0.0) {
       // vx,vy,vz are already physical Cartesian velocity components in the same basis as
-      // x1,x2,x3 (no BL rotation needed, unlike a spherically-tabulated source) -- this is
-      // a flat-space relation (exact in flat space), a good approximation here since the
-      // tabulated velocities themselves carry no GR content (the source simulation did not
-      // apply relativistic corrections either).
+      // x1,x2,x3 (no BL rotation needed, unlike a spherically-tabulated source). Converting
+      // them to a properly GR-normalized 4-velocity is done in two steps:
+      //   1. Build a flat-space (Minkowski) 4-velocity's spatial part, u^i = W*v^i with
+      //      W = 1/sqrt(1-v^2) -- exact only in flat space, but a reasonable approximation
+      //      here since the tabulated velocities themselves carry no GR content (the source
+      //      simulation that produced them did not apply relativistic corrections either).
+      //   2. Treat (u1,u2,u3) as fixed and instead solve the ACTUAL (curved) normalization
+      //      condition g_mu_nu u^mu u^nu = -1 -- a quadratic in u^0, g_00*(u^0)^2 +
+      //      2*b*u^0 + gammasq = 0 with b = g_0i*u^i and gammasq = 1 + g_ij*u^i*u^j -- for
+      //      the future-directed root u^0. This makes the final 4-velocity exactly
+      //      normalized with respect to the true metric at this point, even though step 1
+      //      used a flat-space relation to fix its spatial part.
+      // uu1/uu2/uu3 are then AthenaK's primitive velocity variables (u^i - shift-like
+      // gupper[0][i]/gupper[0][0]*u^0), the same transformation used in gr_torus.cpp.
       Real vsq = fmin(SQR(vx) + SQR(vy) + SQR(vz), 1.0 - 1.0e-10);
       Real W = 1.0/sqrt(1.0 - vsq);
       Real u1 = W * vx;
@@ -371,7 +435,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       uu1 = u1 - gupper[0][1]/gupper[0][0] * u0;
       uu2 = u2 - gupper[0][2]/gupper[0][0] * u0;
       uu3 = u3 - gupper[0][3]/gupper[0][0] * u0;
-      pgas = gm1 * rho * eint;
+      pgas = gm1 * rho * eint;   // ideal-gas EOS: p_gas = (Gamma-1)*rho*eps
     } else {
       rho = rho_bg;
       pgas = pgas_bg;
@@ -404,6 +468,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   // initialize magnetic fields ---------------------------------------
+  // Skipped entirely for hydro-only runs (pmbp->pmhd == nullptr). For MHD, this block:
+  //   1. reads the seed-field parameters below,
+  //   2. builds a cell-edge vector potential A_i (CalculateEnvelopeVectorPotential via
+  //      A1/A2/A3) and takes its discrete curl to get face-centered B (b0.x1f/x2f/x3f),
+  //   3. finds the maximum |B|^2 over the whole grid, and
+  //   4. uniformly rescales B so that (max gas pressure)/(max magnetic pressure) equals
+  //      potential_beta_min.
+  // This is the same four-step structure (and much of the same code) as gr_torus.cpp's
+  // magnetic-field initialization; only the vector-potential shape itself differs.
 
   if (pmbp->pmhd != nullptr) {
     egen.potential_beta_min = pin->GetOrAddReal("problem", "potential_beta_min", 100.0);
@@ -414,7 +487,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     egen.potential_r_star   = pin->GetReal("problem", "potential_r_star");
     etrs = egen;
 
-    // compute vector potential over all faces
+    // Evaluate the vector potential at every cell edge (needed for a curl), including a
+    // face at the outer edge of each meshblock in every direction (hence the ie+1/je+1/
+    // ke+1 upper bounds below).
     int ncells1 = indcs.nx1 + 2*(indcs.ng);
     int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
     int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
@@ -591,7 +666,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       w_bz = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
     });
 
-    // find maximum bsq
+    // Recompute the 4-magnetic-field b^mu and b^2 = b^mu b_mu at every cell from the
+    // just-built cell-centered B^i and the gas velocity (same algebra as the b^2 reduction
+    // in gr_torus.cpp), tracking the maximum b^2 over the whole grid -- needed below to
+    // rescale the field to a target plasma beta.
     Real bsqmax = std::numeric_limits<float>::min();
     Kokkos::parallel_reduce("envelope_beta", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
     KOKKOS_LAMBDA(const int &idx, Real &max_bsq) {
@@ -657,7 +735,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     MPI_Allreduce(MPI_IN_PLACE, &bsqmax, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 #endif
 
-    // Apply renormalization of magnetic field
+    // Rescale B (and therefore b^2, since b^2 ~ B^2) so that max(p_gas)/max(p_mag) equals
+    // potential_beta_min, where p_mag = b^2/2: bnorm = sqrt[(ptotmax/(bsqmax/2))/beta_min],
+    // so that after B -> bnorm*B, ptotmax/(0.5*bsqmax*bnorm^2) == potential_beta_min exactly.
+    // This is what fixes the vector potential's otherwise-arbitrary overall amplitude
+    // (mu=1 in CalculateEnvelopeVectorPotential) to a physically meaningful field strength.
     Real bnorm = sqrt((ptotmax/(0.5*bsqmax))/egen.potential_beta_min);
 
     par_for("pgen_normb0", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
