@@ -8,9 +8,11 @@
 //! stellar envelope onto a black hole, in Cartesian Kerr-Schild coordinates, by directly
 //! reading gas density, velocity, and specific internal energy from a tabulated CSV file
 //! rather than setting them from a closed-form analytic solution (contrast gr_torus.cpp,
-//! whose equilibrium torus IS analytic). On top of that tabulated gas, an analytic
-//! large-scale poloidal magnetic field can optionally be seeded (MHD runs only) following
-//! Eq. (12) of Issa et al. 2025, ApJL 985, L26.
+//! whose equilibrium torus IS analytic). On top of that tabulated gas, a poloidal seed
+//! magnetic field can optionally be built (MHD runs only) as a single density-weighted
+//! field loop -- the same construction gr_torus.cpp uses for its non-vertical FM-torus
+//! seed field, but weighted by the looked-up envelope density in place of an analytic
+//! torus profile (see CalculateEnvelopeVectorPotential below).
 //!
 //! GRID FORMAT AND WHY LOOKUP IS EXACT RATHER THAN INTERPOLATED
 //!   The CSV's grid is a nested-box static mesh refinement (SMR) structure that must
@@ -60,9 +62,10 @@
 //!   - <problem>/rho_min, rho_pow, pgas_min, pgas_pow: power-law background/atmosphere
 //!     floor, rho_bg = rho_min*r^rho_pow, pgas_bg = pgas_min*r^pgas_pow, used wherever the
 //!     CSV has no data for a cell.
-//!   - <problem>/potential_beta_min, potential_r_core, potential_r_star (MHD runs only):
-//!     seed-field target plasma beta and the Rcore/Rstar shape parameters of Eq. (12) --
-//!     see CalculateEnvelopeVectorPotential below.
+//!   - <problem>/potential_beta_min, potential_cutoff, potential_falloff, potential_r_pow,
+//!     potential_rho_pow, potential_r_in (MHD runs only): seed-field target plasma beta and
+//!     the shape of the density-weighted poloidal field loop -- see
+//!     CalculateEnvelopeVectorPotential below.
 //!
 //! OUTPUTS / SIDE EFFECTS
 //!   Initializes the mesh's primitive (and, for MHD, face- and cell-centered magnetic
@@ -130,7 +133,16 @@ struct envelope_pgen {
   Real root_half_width;                          // root box half-width (code units)
   int n_levels, nx_per_level;                    // table's nested-box geometry
   Real potential_beta_min;                       // target gas/magnetic pressure ratio
-  Real potential_r_core, potential_r_star;       // Eq. (12), Issa et al. 2025 (ApJL 985, L26)
+  Real potential_cutoff, potential_falloff;      // MHD seed-field params: sets region of
+                                                  // the envelope to magnetize
+  Real potential_r_pow;                          // set how vector potential scales with
+                                                  // (cylindrical) radius
+  Real potential_rho_pow;                        // set vector potential dependence on the
+                                                  // looked-up envelope density
+  Real potential_r_in;                           // innermost radius of the seed-field
+                                                  // region
+  Real rho_max_for_norm;                         // max density on the grid, used to
+                                                  // normalize the density weighting above
 };
 
 // host-side staging area for the parsed CSV, before unit conversion / device upload
@@ -341,18 +353,19 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // rho/p_gas from the tabulated density/specific internal energy; otherwise (or wherever
   // the tabulated value is smaller) fall back to the power-law background or, near/inside
   // the BH, the fixed excision floor. While doing so, also track the maximum total
-  // pressure over the whole grid (max_ptot) -- needed below to normalize the seed magnetic
-  // field to a target plasma beta.
+  // pressure (max_ptot) and maximum density (max_rho) over the whole grid -- needed below
+  // to normalize the seed magnetic field's density weighting and its target plasma beta.
 
   auto etrs = egen;
   auto &size = pmbp->pmb->mb_size;
   Real ptotmax = std::numeric_limits<float>::min();
+  Real rhomax = std::numeric_limits<float>::min();
   const int nmkji = (pmbp->nmb_thispack)*indcs.nx3*indcs.nx2*indcs.nx1;
   const int nkji = indcs.nx3*indcs.nx2*indcs.nx1;
   const int nji  = indcs.nx2*indcs.nx1;
 
   Kokkos::parallel_reduce("pgen_envelope1", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &max_ptot) {
+  KOKKOS_LAMBDA(const int &idx, Real &max_ptot, Real &max_rho) {
     // compute m,k,j,i indices of thread and call function
     int m = (idx)/nkji;
     int k = (idx - m*nkji)/nji;
@@ -459,7 +472,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       ptot = w0_(m,IPR,k,j,i);
     }
     max_ptot = fmax(ptot, max_ptot);
-  }, Kokkos::Max<Real>(ptotmax));
+    max_rho = fmax(w0_(m,IDN,k,j,i), max_rho);
+  }, Kokkos::Max<Real>(ptotmax), Kokkos::Max<Real>(rhomax));
+
+  // rho_max_for_norm must be globally (not just rank-locally) reduced BEFORE the MHD
+  // vector-potential kernel below consumes it, unlike ptotmax/bsqmax which are only
+  // consumed later (after their own reductions further down)
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &rhomax, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  egen.rho_max_for_norm = rhomax;
 
   // initialize ADM variables -----------------------------------------
 
@@ -475,16 +497,27 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   //   3. finds the maximum |B|^2 over the whole grid, and
   //   4. uniformly rescales B so that (max gas pressure)/(max magnetic pressure) equals
   //      potential_beta_min.
-  // This is the same four-step structure (and much of the same code) as gr_torus.cpp's
-  // magnetic-field initialization; only the vector-potential shape itself differs.
+  // This is the same four-step structure (and much of the same code, including the same
+  // vector-potential formula) as gr_torus.cpp's magnetic-field initialization; the only
+  // difference is where the density used to weight the potential comes from -- a table
+  // lookup here (LookupEnvelopeCell) instead of an analytic torus profile.
 
   if (pmbp->pmhd != nullptr) {
     egen.potential_beta_min = pin->GetOrAddReal("problem", "potential_beta_min", 100.0);
-    // Rcore, Rstar of Eq. (12), Issa et al. 2025 (ApJL 985, L26) -- code units (M). No
-    // codebase-wide default: these are properties of the tabulated envelope itself, so set
-    // them to initial_data_file's actual core/stellar radius.
-    egen.potential_r_core   = pin->GetReal("problem", "potential_r_core");
-    egen.potential_r_star   = pin->GetReal("problem", "potential_r_star");
+    egen.potential_cutoff   = pin->GetOrAddReal("problem", "potential_cutoff", 0.2);
+
+    // As in gr_torus.cpp's FM-torus seed field (Eqs. 33-34 of arXiv:2202.11721), these
+    // three parameters together select between a SANE-like and a MAD-like field topology:
+    //   SANE -> potential_r_pow = 0
+    //           potential_falloff = 0  (when 0 -> falloff is disabled)
+    //           potential_rho_pow = 1
+    //   MAD -> potential_r_pow = 3
+    //          potential_falloff = 400
+    //          potential_rho_pow = 1
+    egen.potential_falloff  = pin->GetOrAddReal("problem", "potential_falloff", 0.0);
+    egen.potential_r_pow    = pin->GetOrAddReal("problem", "potential_r_pow", 0.0);
+    egen.potential_rho_pow  = pin->GetOrAddReal("problem", "potential_rho_pow", 1.0);
+    egen.potential_r_in     = pin->GetOrAddReal("problem", "potential_r_in", 5.0);
     etrs = egen;
 
     // Evaluate the vector potential at every cell edge (needed for a curl), including a
@@ -842,24 +875,44 @@ static void LookupEnvelopeCell(struct envelope_pgen pgen, struct EnvTables tab,
 }
 
 //----------------------------------------------------------------------------------------
-// Vector potential for the envelope's analytic seed field: Equation (12) of Issa et al.
-// (2025, ApJL 985, L26),
-//   A_phi(r,theta) = mu * sin^2(theta) * max[r^2/(r^2+Rcore^2) - (r/Rstar)^3, 0],
-//   A_theta = 0,
-// which gives a nearly uniform vertical field for r <~ Rcore that turns radial inside the
-// star and closes near the stellar surface Rstar. Purely geometric (no density lookup,
-// unlike gr_torus.cpp's torus potential this replaced): the overall amplitude (mu in the
-// paper, set there by a target core magnetization/plasma beta) is fixed implicitly here by
-// evaluating with mu = 1 and letting the potential_beta_min renormalization below rescale
-// the resulting field.
+// Vector potential for an analytic seed field (poloidal loop), following gr_torus.cpp's
+// non-vertical-field FM-torus potential (see CalculateVectorPotentialInTiltedTorus there):
+// a single poloidal loop, density-weighted by the looked-up (and floored) envelope density
+// in place of an analytic torus profile, and scaled radially by a power law in cylindrical
+// radius relative to pgen.potential_r_in (which plays the role the torus's r_edge plays in
+// gr_torus.cpp). No field is seeded at all below r = potential_r_in.
+//   A_theta = 0
+//   A_phi   = max[ (rho/rho_max_for_norm)^potential_rho_pow
+//                  * (cyl_radius/potential_r_in)^potential_r_pow
+//                  * exp(-r/potential_falloff)              [only if potential_falloff!=0]
+//                  - potential_cutoff, 0 ]
+// potential_cutoff shrinks the magnetized region relative to the full density-weighted
+// profile; the overall amplitude is otherwise arbitrary and is fixed by the
+// potential_beta_min renormalization applied to the whole field further down.
 
 KOKKOS_INLINE_FUNCTION
 static void CalculateEnvelopeVectorPotential(struct envelope_pgen pgen, struct EnvTables tab,
                                              Real r, Real theta, Real x1, Real x2, Real x3,
                                              Real *patheta, Real *paphi) {
-  Real bracket = SQR(r)/(SQR(r) + SQR(pgen.potential_r_core)) - pow(r/pgen.potential_r_star, 3);
-  *patheta = 0.0;
-  *paphi = SQR(sin(theta)) * fmax(bracket, 0.0);
+  Real atheta = 0.0, aphi = 0.0;
+  if (r >= pgen.potential_r_in) {
+    Real rho_i, vx, vy, vz, eint, valid;
+    LookupEnvelopeCell(pgen, tab, x1, x2, x3, &rho_i, &vx, &vy, &vz, &eint, &valid);
+    Real rho_bg = pgen.rho_min * pow(r, pgen.rho_pow);
+    Real rho_here = (valid > 0.0) ? fmax(rho_i, rho_bg) : rho_bg;
+
+    Real sin_theta = sin(theta);
+    Real cyl_radius = r * sin_theta;
+    Real scaling = pow(cyl_radius/pgen.potential_r_in, pgen.potential_r_pow);
+    if (pgen.potential_falloff != 0.0) {
+      scaling *= exp(-r/pgen.potential_falloff);
+    }
+    aphi = pow(rho_here/pgen.rho_max_for_norm, pgen.potential_rho_pow) * scaling;
+    aphi -= pgen.potential_cutoff;
+    aphi = fmax(aphi, 0.0);
+  }
+  *patheta = atheta;
+  *paphi = aphi;
   return;
 }
 
